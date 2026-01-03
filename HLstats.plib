@@ -1,0 +1,458 @@
+# HLstatsZ - Real-time player and clan rankings and statistics
+# Originally HLstatsX Community Edition by Nicholas Hastings (2008–20XX)
+# Based on ELstatsNEO by Malte Bayer, HLstatsX by Tobias Oetzel, and HLstats by Simon Garner
+#
+# HLstats > HLstatsX > HLstatsX:CE > HLStatsZ
+# HLstatsZ continues a long lineage of open-source server stats tools for Half-Life and Source games.
+# This version is released under the GNU General Public License v2 or later.
+# 
+# For current support and updates, visit: https://snipezilla.com or https://github.com/SnipeZilla
+
+# HLstatsZ release version number
+$g_version = "2.4.0";
+
+my %stmt_cache = ();
+%g_eventTables = (
+    "TeamBonuses",
+        ["playerId", "actionId", "bonus"],
+    "ChangeRole",
+        ["playerId", "role"],
+    "ChangeName",
+        ["playerId", "oldName", "newName"],
+    "ChangeTeam",
+        ["playerId", "team"],
+    "Connects",
+        ["playerId", "ipAddress", "hostname", "hostgroup"],
+    "Disconnects",
+        ["playerId"],
+    "Entries",
+        ["playerId"],
+    "Frags",
+        ["killerId", "victimId", "weapon", "headshot", "killerRole", "victimRole", "pos_x","pos_y","pos_z", "pos_victim_x","pos_victim_y","pos_victim_z"],
+    "PlayerActions",
+        ["playerId", "actionId", "bonus", "pos_x","pos_y","pos_z"],
+    "PlayerPlayerActions",
+        ["playerId", "victimId", "actionId", "bonus", "pos_x","pos_y","pos_z", "pos_victim_x","pos_victim_y","pos_victim_z"],
+    "Suicides",
+        ["playerId", "weapon", "pos_x","pos_y","pos_z"],
+    "Teamkills",
+        ["killerId", "victimId", "weapon", "pos_x","pos_y","pos_z", "pos_victim_x","pos_victim_y","pos_victim_z"],
+    "Rcon",
+        ["type", "remoteIp", "password", "command"],
+    "Admin",
+        ["type", "message", "playerName"],
+    "Statsme",
+        ["playerId", "weapon", "shots", "hits", "headshots", "damage", "kills", "deaths"],
+    "Statsme2",
+        ["playerId", "weapon", "head", "chest", "stomach", "leftarm", "rightarm", "leftleg", "rightleg"],
+    "StatsmeLatency",
+        ["playerId", "ping"],
+    "StatsmeTime",
+        ["playerId", "time"],
+    "Latency",
+        ["playerId", "ping"],
+    "Chat",
+        ["playerId", "message_mode", "message"]
+);
+
+
+####################################
+#         Common Functions         #
+####################################
+
+sub quote_sql {
+    my ($val) = @_;
+    return "NULL" unless defined $val;
+    $val =~ s/\\/\\\\/g;   # replace \ with \\
+    $val =~ s/'/\\'/g;     # replace ' with \'
+    $val =~ s/\\/\\\\/g;   # replace \ with \\
+    $val =~ s/'/\\'/g;     # replace ' with \'
+    return "'$val'";
+}
+
+sub number_format {
+  local $_  = shift;
+  1 while s/^(-?\d+)(\d{3})/$1,$2/;
+  return $_;
+}
+
+sub date_format {
+  my $timestamp = shift;
+  return sprintf('%d hours and %d minutes', 
+                  $timestamp / 3600, 
+                  $timestamp / 3600 % 60
+                 );
+}
+
+####################################
+#         Connect to MySql         #
+####################################
+
+sub DB_connect {
+    return if $dbh && $dbh->ping;
+
+    my $dsn = $db_driver eq 'mariadb'
+              ? "DBI:MariaDB:database=$db_name;host=$db_host"
+              : "DBI:mysql:database=$db_name;host=$db_host";
+
+    for my $attempt (1 .. 3) {
+        eval {
+            $dbh = DBI->connect(
+                $dsn, $db_user, $db_pass,
+                {
+                    RaiseError           => 0,
+                    PrintError           => 1,
+                    AutoCommit           => 1,
+                    ($db_driver eq 'mysql' ? (
+                        mysql_enable_utf8mb4   => 1,
+                        mysql_auto_reconnect   => 1,
+                    ) : ( mariadb_auto_reconnect => 1,))
+                }
+            );
+        };
+
+        if ($dbh) {
+            $dbh->do("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci");
+            printEvent("MYSQL", "Connected to '$db_name' on '$db_host' as '$db_user' with $db_driver", 1);
+            return 1;
+        }
+
+        printEvent("MYSQL", "Connection attempt $attempt failed: $DBI::errstr", 1);
+        sleep(5);
+    }
+
+    die "Failed to connect to DB after $attempt attempts.";
+}
+
+
+sub query_now {
+    my ($sql, @bind) = @_;
+    DB_connect();
+
+    my $sth = $dbh->prepare($sql);
+    unless ($sth) {
+        printEvent("MYSQL", "Prepare failed:\n$sql\n$DBI::errstr", 1);
+        return;
+    }
+    $sth->execute(@bind);
+    return $sth
+}
+
+sub exec_now {
+    my ($sql, @bind) = @_;
+    DB_connect();
+    $dbh->do($sql, undef, @bind);
+}
+
+
+sub exec_cache {
+    my ($query_id, $sql, @bind) = @_;
+    DB_connect();
+
+    unless ($stmt_cache{$query_id}) {
+        $stmt_cache{$query_id} = $dbh->prepare($sql);
+        unless ($stmt_cache{$query_id}) {
+            printEvent("MYSQL", "Prepare failed ($query_id):\n$sql\n$DBI::errstr", 1);
+            return;
+        }
+    }
+
+    unless ($stmt_cache{$query_id}->execute(@bind)) {
+        printEvent("MYSQL", "Execute failed ($query_id):\n$sql\n$DBI::errstr", 1);
+        printEvent("MYSQL", print join(', ', @bind), 1);
+        delete $stmt_cache{$query_id};
+
+        $stmt_cache{$query_id} = $dbh->prepare($sql);
+        if ($stmt_cache{$query_id} && $stmt_cache{$query_id}->execute(@bind)) {
+            return $stmt_cache{$query_id};
+        }
+
+        printEvent("MYSQL", "Retry failed for ($query_id)", 1);
+        return;
+    }
+
+    return $stmt_cache{$query_id};
+}
+
+#
+# string resolveIp (string ip, boolean quiet)
+#
+# Do a DNS reverse-lookup on an IP address and return the hostname, or empty
+# string on error.
+#
+
+sub resolveIp
+{
+    my ($ip, $quiet) = @_;
+    my ($host) = "";
+    
+    unless ($g_dns_resolveip)
+    {
+        return "";
+    }
+    
+    
+    eval
+    {
+        $SIG{ALRM} = sub { die "DNS Timeout\n" };
+        alarm $g_dns_timeout;    # timeout after $g_dns_timeout sec
+        $host = gethostbyaddr(inet_aton($ip), AF_INET);
+        alarm 0;
+    };
+    
+    if ($@)
+    {
+        my $error = $@;
+        chomp($error);
+        printEvent("DNS", "Resolving hostname (timeout $g_dns_timeout sec) for IP \"$ip\" - $error ", 1);
+        $host = "";        # some error occurred
+    }
+    elsif (!defined($host))
+    {
+        printEvent("DNS", "Resolving hostname (timeout $g_dns_timeout sec) for IP \"$ip\" - No Host ", 1);
+        $host = "";        # ip did not resolve to any host
+    } else {
+        $host = lc($host);    # lowercase
+        printEvent("DNS", "hostname resolved for IP \"$ip\" - $host ", 1);
+    }
+    chomp($host);
+    return $host;
+}
+
+
+#
+# object queryHostGroups ()
+#
+# Returns result identifier.
+#
+
+sub queryHostGroups
+{
+    return query_now("
+        SELECT
+            pattern,
+            name,
+            LENGTH(pattern) AS patternlength
+        FROM
+            hlstats_HostGroups
+        ORDER BY
+            patternlength DESC,
+            pattern ASC
+    ");
+}
+
+
+#
+# string getHostGroup (string hostname[, object result])
+#
+# Return host group name if any match, or last 2 or 3 parts of hostname.
+#
+
+sub getHostGroup
+{
+    my ($hostname, $result) = @_;
+    my $hostgroup = "";
+    
+    # User can define special named hostgroups in hlstats_HostGroups, i.e.
+    # '.adsl.someisp.net' => 'SomeISP ADSL'
+    
+    $result = &queryHostGroups()  unless ($result);
+    $result->execute();
+    
+    while (my($pattern, $name) = $result->fetchrow_array())
+    {
+        $pattern = quotemeta($pattern);
+        $pattern =~ s/\\\*/[^.]*/g;    # allow basic shell-style globbing in pattern
+        if ($hostname =~ /$pattern$/)
+        {
+            $hostgroup = $name;
+            last;
+        }
+    }
+    $result->finish;
+    
+    if (!$hostgroup)
+    {
+        #
+        # Group by last 2 or 3 parts of hostname, i.e. 'max1.xyz.someisp.net' as
+        # 'someisp.net', and 'max1.xyz.someisp.net.nz' as 'someisp.net.nz'.
+        # Unfortunately some countries do not have categorical SLDs, so this
+        # becomes more complicated. The dom_nosld array below contains a list of
+        # known country codes that do not use categorical second level domains.
+        # If a country uses SLDs and is not listed below, then it will be
+        # incorrectly grouped, i.e. 'max1.xyz.someisp.yz' will become
+        # 'xyz.someisp.yz', instead of just 'someisp.yz'.
+        #
+        # Please mail sgarner@hlstats.org with any additions.
+        #
+        
+        my @dom_nosld = (
+            "ca", # Canada
+            "ch", # Switzerland
+            "be", # Belgium
+            "de", # Germany
+            "ee", # Estonia
+            "es", # Spain
+            "fi", # Finland
+            "fr", # France
+            "ie", # Ireland
+            "nl", # Netherlands
+            "no", # Norway
+            "ru", # Russia
+            "se", # Sweden
+        );
+        
+        my $dom_nosld = join("|", @dom_nosld);
+        
+        if ($hostname =~ /([\w-]+\.(?:$dom_nosld|\w\w\w))$/)
+        {
+            $hostgroup = $1;
+        }
+        elsif ($hostname =~ /([\w-]+\.[\w-]+\.\w\w)$/)
+        {
+            $hostgroup = $1;
+        }
+        else
+        {
+            $hostgroup = $hostname;
+        }
+    }
+    
+    return $hostgroup;
+}
+
+
+#
+# void doConf (object conf, hash directives)
+#
+# Walk through configuration directives, setting values of global variables.
+#
+
+sub doConf
+{
+    my ($conf, %directives) = @_;
+    
+    while (($directive, $variable) = each(%directives))
+    {
+        if ($directive eq "Servers") {
+           %$variable = $conf->get($directive);
+        } else {
+            $$variable = $conf->get($directive);
+        }
+    }
+
+}
+
+#
+# void setOptionsConf (hash optionsconf)
+#
+# Walk through configuration directives, setting values of global variables.
+#
+
+sub setOptionsConf
+{
+    my (%optionsconf) = @_;
+    
+    while (($thekey, $theval) = each(%optionsconf))
+    {
+        if($theval)
+        {
+              $$thekey = $theval;
+        }
+    }
+
+}
+
+#
+# string abbreviate (string thestring[, int maxlength)
+#
+# Returns thestring abbreviated to maxlength-3 characters plus "...", unless
+# thestring is shorter than maxlength.
+#
+
+sub abbreviate
+{
+    my ($thestring, $maxlength) = @_;
+    
+    $maxlength = 12  unless ($maxlength);
+    
+    if (length($thestring) > $maxlength)
+    {
+        $thestring = substr($thestring, 0, $maxlength - 3);
+        return "$thestring...";
+    }
+    else
+    {
+        return $thestring;
+    }
+}
+
+#
+# Logs event information to stdout.
+#
+my @DBGQ;
+my $DBG_MAX       = 20000;
+my $FLUSH_EVERY   = 0.05;
+my $FLUSH_LINES   = 500;
+my $last_flush    = time();
+
+my $last_ts_sec = -1;
+my $last_ts_str = '';
+
+sub _ts_cached {
+    my $sec = time();
+    $sec = int($sec);
+    if ($sec != $last_ts_sec) {
+        my ($s,$m,$h,$d,$mo,$y) = localtime($sec);
+        $last_ts_str = sprintf(
+            "%04d-%02d-%02d %02d:%02d:%02d",
+            $y+1900, $mo+1, $d, $h, $m, $s
+        );
+        $last_ts_sec = $sec;
+    }
+    return $last_ts_str;
+}
+
+sub _dbg_flush {
+    return unless @DBGQ;
+    print STDOUT join('', @DBGQ);
+    @DBGQ = ();
+    $last_flush = time();
+}
+
+sub printEvent
+{
+    my ($code, $description, $level) = @_;
+
+    return unless (
+        ($g_stdin == 0 && $g_debug > 0 &&
+            ($g_debug == 9 || $level == 1 || $g_debug == $level))
+        || ($g_stdin == 1 && $level == 1)
+    );
+
+    my $line;
+    if ($level == 2) {
+        $line = "$code - $description\n";
+    } else {
+        my $timestamp = _ts_cached();
+        $line = sprintf("%s %21s - %s: %s\n", $timestamp, $s_addr, $code, $description);
+    }
+
+    push @DBGQ, $line;
+
+    if (@DBGQ > $DBG_MAX) {
+        splice(@DBGQ, 0, int($DBG_MAX / 2));
+    }
+
+    if (@DBGQ >= $FLUSH_LINES) {
+        _dbg_flush();
+        return;
+    }
+
+    my $now = time();
+    if (($now - $last_flush) >= $FLUSH_EVERY) {
+        _dbg_flush();
+    }
+}
+
+1;
