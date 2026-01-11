@@ -1371,7 +1371,6 @@ sub readDatabaseConfig()
     %g_config_servers = ();
     %g_servers = ();
     %g_games = ();
-
     # elstatsneo: read the servers portion from the mysql database
     my $srv_id = query_now("SELECT serverId,CONCAT(address,':',port) AS addr FROM hlstats_Servers");
     while ( my($serverId,$addr) = $srv_id->fetchrow_array) {
@@ -1389,9 +1388,17 @@ sub readDatabaseConfig()
         eval $tmp;
     }
     $gsettings->finish;
-
-    # Apply defaults
-
+    # CRONJOB
+    if ($path_perl ne "")
+    {
+        my $yesterday = query_now("SELECT value FROM hlstats_Options WHERE keyname = 'awards_d_date'");
+        $awards_today = $yesterday->fetchrow_array;
+        $bans_today = $awards_today;
+        $yesterday->finish;
+        my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time() - 86400);
+        my $yesterday = sprintf("%04d-%02d-%02d", $year+1900, $mon+1, $mday);
+        printEvent("CRONJOB", $yesterday ne $awards_today ? "Daily tasks are outdated" :"Daily tasks are up to date", 1);
+    }
     # Apply defaults
     my %defaults = (
         MinPlayers                     => 0,
@@ -3132,20 +3139,20 @@ sub handleData
     # CRONJOB
     if ($path_perl ne "")
     {
-        my ($sec,$min,$hour,$mday,$mon,$year) = localtime();
-        my $today = sprintf("%04d-%02d-%02d", $year+1900, $mon+1, $mday);
-        run_daily_task($today, \$award_today, $path_awards);
-        run_daily_task($today, \$bans_today, $path_bans);
+        my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time() - 86400);
+        my $yesterday = sprintf("%04d-%02d-%02d", $year+1900, $mon+1, $mday);
+        run_daily_task($yesterday, \$awards_today, $path_awards);
+        run_daily_task($yesterday, \$bans_today, $path_bans);
     }
 
 }
 
 sub run_daily_task {
-    my ($today, $last_run_ref, $path) = @_;
+    my ($yesterday, $last_run_ref, $path) = @_;
 
-    return if !$path || $$last_run_ref eq $today;
+    return if !$path || $$last_run_ref eq $yesterday;
 
-    $$last_run_ref = $today;
+    $$last_run_ref = $yesterday;
 
     if (!is_windows()) {
         my $pid = fork();
