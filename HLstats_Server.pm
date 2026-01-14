@@ -1241,10 +1241,6 @@ sub messageAll
                 }
             }
 
-            if ($self->{play_game} != FF())
-            {
-                $msg = $self->{format_action}.$msg;
-            }
             $self->messageMany($msg, 1, @userlist);
         }         
         else
