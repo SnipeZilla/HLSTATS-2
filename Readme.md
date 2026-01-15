@@ -1,6 +1,6 @@
 # HLstats v2 — event‑driven rewrite built on Mojolicious
 
-- Unified **non-blocking** listener for SRCDS UDP + CS2 HTTP logs on the same port with **Mojo::IOLoop** (minimalistic event loop based on Mojo::Reactor)
+- Unified **non-blocking** listener for SRCDS **UDP** + CS2 **HTTP** logs on the same port with **Mojo::IOLoop** (minimalistic event loop based on Mojo::Reactor)
 - **Mojo::IOLoop->next_tick()** scheduling, lightweight, precise callbacks that run on the next loop iteration without blocking anything else
 - **Mojo::IOLoop->recurring()** timers for low‑priority tasks (cleanup, stats, load...) leaving logs parsing with a higher priority
 - Automatic socket **healthcheck** with diagnosis and reconnection
