@@ -70,5 +70,6 @@ Add to your launch commands -usercon
 
 ## 🤝 Credits
 Based on HLstatsX:CE 1.6.19<br>
-Maintained and modernized by SnipeZilla.
+Maintained and modernized by SnipeZilla<br>
+Help and validation by [ghost-](https://github.com/ghostt187)
 
