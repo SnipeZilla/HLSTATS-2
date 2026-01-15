@@ -1,61 +1,31 @@
-# HLstats v2
+# HLstats v2 — event‑driven rewrite built on Mojolicious
 
-**A modern, resilient evolution of HLstatsX:CE 1.6.19 — built for Source 2, CS2, and the future of competitive multiplayer.**
-
-HLstatsZ is a full-scale rework of the classic real-time stats and ranking system for `srcds`-based games. Designed to thrive in both legacy Source 1 environments and modern CS2 servers, this fork introduces asynchronous RCON, hybrid log ingestion (UDP + HTTP), competitive mode awareness, and a scalable, restart-safe architecture.
-
-Whether you're running a community server or a high-performance competitive hub, HLstatsZ delivers unmatched reliability, flexibility, and insight.
-
+- Unified **non-blocking** listener for SRCDS UDP + CS2 HTTP logs on the same port with **Mojo::IOLoop** (minimalistic event loop based on Mojo::Reactor)
+- **Mojo::IOLoop->next_tick()** scheduling, lightweight, precise callbacks that run on the next loop iteration without blocking anything else
+- **Mojo::IOLoop->recurring()** timers for low‑priority tasks (cleanup, stats, load...) leaving logs parsing with a higher priority
+- Automatic socket **healthcheck** with diagnosis and reconnection
+- Log parsing **prioritized** above all auxiliary operations
+- Full query set optimized for modern **high‑performance InnoDB** engine (DB ≥ 84) and **fastest collation** (DB ≥ 84)
+- DB driver: Choice of **MariaDB** or **MySQL**
+- **High‑throughput queued** RCON and log pipeline (can queued thousands of logs/s if needed across multi servers)
+- Source 1 plugins supported (hlstatsx.smx, amxmodx)
+- Source 2 (CS2) via **[HLstatsZ](https://github.com/SnipeZilla/CS2-HLstatsX-Plugin)** plugin with Sourcemod‑style events (Server mod set as SOURCEMOD for seamless integration hlx_sm_*)
+- Optional built‑in daily **cronjob**
+- Comprehensive debug mode (threaded) that never blocks main loop
 ---
 
-## 🚀 Key Features
+## 🤔❓ FAQ
 
-### 🌐 Hybrid Log Ingestion (UDP + HTTP)
+- Why don’t my daily rewards run?<br>
+Now with fully optional built‑in daily cronjob (Awards & Bans); solving one of the most common complaints
 
-- Unified listener for both legacy `srcds` UDP logs and CS2’s HTTP-based log stream — **on the same port**
-- Powered by `Mojo::IOLoop` for non-blocking, event-driven performance
-- Automatic log format detection and normalization
-- Mojo::IOLoop powers the listener, so UDP and HTTP log handling is non-blocking.
-- Multiple servers can stream logs concurrently without blocking each other.
-- Packet parsing is modular and event-driven — no global locks or serialized queues.
-
-### 🧠 Intelligent Packet Parsing
-
-- Modular parser system handles mixed log formats with precision
-- Per-server context tracking: map, hostname, difficulty, player state
-- Engine-aware dispatching for Source 1 and Source 2 events
-
-### 🔌 Plugin Compatibility
-
-- **Source 1**: Fully supports legacy `hlstatsx.smx` Sourcemod plugin
-- **CS2 / Source 2**: Compatible with [HLstatsZ plugin](https://github.com/SnipeZilla/CS2-HLstatsX-Plugin) for CounterStrikeSharp
-  - Emulates Sourcemod-style events (`hlx_sm_*`)
-  - Server mod set as `SOURCEMOD` for seamless integration
-
-### 🛠️ Server-Specific Overrides
-
-- Per-server config for:
-  - Custom commands
-  - Stat weighting and modifiers
-  - Competitive mode toggles
-  - Option to challenge Bots but keep hidden from global stats (IgnoreBots 0 / 1=ignored / -1=hidden)
----
-
-## 💡 Why HLstats v2?
-
-- **Battle-tested**: Trusted across thousands of servers and millions of player sessions
-- **Zero client-side footprint**: No in-game installs or plugins required
-- **External server support**: Offloads processing to avoid impacting game performance
-- **Fully async**: RCON and log ingestion are non-blocking, restart-safe, and ops-friendly
-- **Unlimited servers**: Logs concurrently without blocking each other (still need a solid database)
-- **DB driver**: Choice of MariaDB or MySQL; Queries are optimized and native utf8mb4
-- **Built for CS2**: Handles competitive mode, Source 2 quirks, and HTTP logging natively
-- **Native support of Server Log**: HLstatsX reads and parses raw server logs directly—no dependencies, no guesswork. And since HLTV depends on those logs, unless any others ranking system, HLstats will always work!
+- How to ignore Warmup or End Of Round?<br>
+Edit server and set `BonusRoundIgnore 1` 
 
 ---
 
 ## 📦 Installation & Setup
-**Windows Perl, must be compiled with mysql:**
+**Windows Perl**(must be compiled with mysql):
    * https://strawberryperl.com/release-notes/5.38.0.1-64bit.html
 
 **Additional modules:**
@@ -99,6 +69,6 @@ Add to your launch commands -usercon
 ---
 
 ## 🤝 Credits
-Based on HLstatsX:CE 1.6.19
-Maintained and modernized by the community for CS2 and beyond.
+Based on HLstatsX:CE 1.6.19<br>
+Maintained and modernized by SnipeZilla.
 
