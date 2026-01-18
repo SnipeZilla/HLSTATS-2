@@ -690,9 +690,10 @@ sub getAddress
     my $haveAddress = 0;
     my $ignore_bots    = $::g_servers{$self->{server}}->{ignore_bots} // 0;
 
-    if ( $self->{is_bot} && $ignore_bots == 0) {
-        $self->{address} = '127.0.0.1';
-    } else { $self->{address} = ""; }
+    if ( $self->{is_bot} ) {
+        if ($ignore_bots == 0) { $self->{address} = '127.0.0.1'; }
+        else { $self->{address} = ""; }
+    }
 
     if ($self->{address}) {
 
