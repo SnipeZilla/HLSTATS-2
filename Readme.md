@@ -8,10 +8,10 @@
 - Full query set optimized for modern **high‑performance InnoDB** engine (DB ≥ 84) and **fastest collation** (DB ≥ 84)
 - DB driver: Choice of **MariaDB** or **MySQL**
 - **High‑throughput queued** RCON and log pipeline (can queued thousands of logs/s if needed across multi servers)
-- Source 1 plugins supported (hlstatsx.smx, amxmodx)
+- Source plugins supported (hlstatsx.smx, amxmodx)
 - Source 2 (CS2) via **[HLstatsZ](https://github.com/SnipeZilla/CS2-HLstatsX-Plugin)** plugin with Sourcemod‑style events (Server mod set as SOURCEMOD for seamless integration hlx_sm_*)
 - Optional built‑in daily **cronjob**
-- Comprehensive debug mode (threaded) that never blocks main loop
+- Comprehensive debug mode (threaded) that never blocks the main loop
 ---
 
 ## 🤔❓ FAQ
@@ -20,7 +20,7 @@
 Now with fully optional built‑in daily cronjob (Awards & Bans); solving one of the most common complaints
 
 - How to ignore Warmup or End Of Round?<br>
-Edit server and set `BonusRoundIgnore 1` 
+Edit server details and set `BonusRoundIgnore 1` 
 
 ---
 
@@ -38,7 +38,15 @@ Edit server and set `BonusRoundIgnore 1`
    * Linux: $ curl -L https://cpanmin.us | perl - -M https://cpan.metacpan.org -n Mojolicious
    * Windows > cpan install Mojolicious
 
-**Sourcegold (source 1)**
+**GoldSrc**
+- server.cfg
+```
+rcon_password "PaSsWoRd"
+log on
+logaddress_delall
+logaddress_add 64.74.97.164 27500
+```
+**Source**
 - server.cfg
 ```
 rcon_password "PaSsWoRd"
@@ -72,4 +80,3 @@ Add to your launch commands -usercon
 Based on HLstatsX:CE 1.6.19<br>
 Maintained and modernized by SnipeZilla<br>
 Help and validation by [ghost-](https://github.com/ghostt187)
-
