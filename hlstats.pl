@@ -3065,7 +3065,6 @@ sub handleData
                     $g_servers{$server}->track_server_load();
                     $g_servers{$server}->{track_server_timestamp} = $ev_daemontime;
                     printEvent("MYSQL", "Insert new server load timestamp", 4);
-                    $g_servers{$server}->{num_players_load} = 0;
                 }
             } else { $g_servers{$server}->{track_server_timestamp} = $ev_daemontime };
 
@@ -3078,10 +3077,14 @@ sub handleData
                     my $t = ($g_mode eq "LAN") ? 500 : 60;
                     my $userid    = $player->{userid};
                     my $uniqueid  = $player->{uniqueid};
-                    if ( $player->{timestamp} && ($ev_daemontime - $player->{timestamp}) > $t) {
+                    my $delayed   = (!$player->{is_bot} && (!$player->{"ping"} || !$player->{address})) ? 1:0;
+                    if ( $player->{timestamp} && (( ($ev_daemontime - $player->{timestamp}) > $t) || $delayed) ) {
                         if (!defined($status_players{$uniqueid})) {
                             printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
                             removePlayer($server, $userid, $uniqueid);
+                        }  elsif ($delayed) {
+                            $player->getAddress(1);
+                            $player->flushDB();
                         }
                     }
                 }

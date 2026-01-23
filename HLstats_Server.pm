@@ -55,7 +55,6 @@ sub new
     $self->{map}           = "";
     $self->{numplayers}    = 0;
     $self->{num_trackable_players} = 0;
-    $self->{num_players_load} = 0;
     $self->{minplayers}    = 6;
     $self->{maxplayers}    = $maxplayers;
     $self->{difficulty}    = 0;
@@ -526,7 +525,7 @@ sub track_server_load {
                 fps=?",
         $self->{id},
         $new_timestamp,
-        $self->{num_players_load},
+        $self->{numplayers},
         $self->{minplayers},
         $self->{maxplayers},
         $self->{map},
@@ -1145,7 +1144,7 @@ sub flush_player_count
 {
     my ($self) = @_;
     
-    ::exec_cache("flush_plyr_cnt", "UPDATE hlstats_Servers SET act_players=? WHERE serverId=?", $self->{num_players_load}, $self->{id});
+    ::exec_cache("flush_plyr_cnt", "UPDATE hlstats_Servers SET act_players=? WHERE serverId=?", $self->{numplayers}, $self->{id});
 }
 
 sub update_server_loc {
@@ -1337,7 +1336,6 @@ sub updatePlayerCount
         }
         $self->{numplayers} = $num;
         $self->{num_trackable_players} = $trackable;
-        $self->{num_players_load} = $self->{num_players_load} > $trackable ? $self->{num_players_load} : $trackable;
     } else {
         $self->{numplayers} = scalar keys %{$self->{srv_players}};
         while (my($pl, $player) = each(%{$self->{srv_players}})) {
@@ -1346,7 +1344,6 @@ sub updatePlayerCount
             }
         }
         $self->{num_trackable_players} = $trackable;
-        $self->{num_players_load} = $self->{num_players_load} > $trackable ? $self->{num_players_load} : $trackable;
     }
 
     $self->flush_player_count();

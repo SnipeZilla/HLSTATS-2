@@ -130,7 +130,7 @@ sub new
         $self->insertPlayerLivestats();
     }
     $self->setName($params{name});
-    $self->getAddress();
+    $self->getAddress(0);
     $self->flushDB();
 
     ::printEvent("MYSQL", "Created new player object " . $self->getInfoString(),4);
@@ -686,20 +686,19 @@ sub getInfoString
 
 sub getAddress
 {
-    my ($self) = @_;
-    my $haveAddress = 0;
-    my $ignore_bots    = $::g_servers{$self->{server}}->{ignore_bots} // 0;
+    my ($self, $delayed) = @_;
+    my $haveAddress      = $self->{address} ? 1:0;
+    my $ignore_bots      = $::g_servers{$self->{server}}->{ignore_bots} // 0;
 
     if ( $self->{is_bot} ) {
         if ($ignore_bots == 0) { $self->{address} = '127.0.0.1'; }
         else { $self->{address} = ""; }
     }
 
-    if ($self->{address}) {
+    if ($::g_stdin == 0 && $self->{is_bot} == 0 &&
+       ( $self->{userid} > 0 || $::g_servers{$self->{server}}->{play_game} == CS2()) &&
+       (!$haveAddress || $delayed)) {
 
-        $haveAddress = 1;
-
-    } elsif ($::g_stdin == 0 && $self->{is_bot} == 0 && ( ($self->{userid} > 0) || (($self->{userid} == 0) && ($::g_servers{$self->{server}}->{play_game} == CS2())) )) {
         my $slot_name = $self->{userid}."/".$self->{name};
 
         ::printEvent("RCON", "rcon_getaddress for $slot_name",3);
@@ -710,7 +709,7 @@ sub getAddress
             $self->{userid} =  $result->{UserID};
         }
         if (defined $result->{Address} && $result->{Address} ne "") {
-            $haveAddress = 1;
+            $haveAddress = 2;
             $self->{address}  = $result->{Address};
             $self->{cli_port} = $result->{ClientPort};
             $self->{ping}     = $result->{Ping};
@@ -719,7 +718,7 @@ sub getAddress
         }
     }
 
-    if ($haveAddress > 0)
+    if ($haveAddress > 2 || !$delayed)
     {
         # Update player IP address in database
         my $query = "
