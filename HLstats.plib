@@ -9,7 +9,7 @@
 # For current support and updates, visit: https://snipezilla.com or https://github.com/SnipeZilla
 
 # HLstatsZ release version number
-$g_version = "2.4.4";
+$g_version = "2.4.5";
 
 my %stmt_cache = ();
 %g_eventTables = (

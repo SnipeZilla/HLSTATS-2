@@ -2015,7 +2015,7 @@ sub doEvent_WorldAction
             $g_servers{$s_addr}->analyze_teams();
         }
         
-        if (($g_servers{$s_addr}->{lastdisabledbonus}+5) < $ev_remotetime && $g_servers{$s_addr}->{bonusroundignore} > 0) {
+        if (($g_servers{$s_addr}->{lastdisabledbonus}+10) < $ev_remotetime && $g_servers{$s_addr}->{bonusroundignore} > 0) {
             $g_servers{$s_addr}->set("bonusroundtime_ts", $ev_remotetime);
             $g_servers{$s_addr}->set("lastdisabledbonus", $ev_remotetime);
             $g_servers{$s_addr}->set("bonusroundtime_state", 1);

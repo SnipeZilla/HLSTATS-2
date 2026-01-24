@@ -368,15 +368,6 @@ sub _inbox_gc
         delete $self->{inbox}{$id} if ($now - ($ent->{t} || $now)) > $max_age;
     }
 }
-#
-# Get error message
-#
-
-sub error
-{
-  my ($self) = @_;
-  return $self->{"rcon_error"};
-}
 
 #
 # Parse "status" command output into player information
@@ -385,7 +376,7 @@ sub error
 sub find_steamid
 {
     my ($self, $userid, $slot) = @_;
-    my $server = $self->{server_object}{srv_players} or return;
+    my $server = $self->{server_object}->{srv_players} or return;
     for my $player ( values %$server ) {
         next unless (defined $player->{userid});
         if ($player->{userid} == $userid ) {
@@ -677,7 +668,7 @@ sub getPlayer
   }
   else
   {
-    $self->{"error"} = "No such player # $uniqueid";
+    ::printEvent("RCON", "getPlayer No such player: $uniqueid", 3);
     return 0;
   }
 }

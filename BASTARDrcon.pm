@@ -36,16 +36,64 @@ sub new
     # Initialise properties
     $self->{server_object} = $server_object;
     $self->{rcon_password} = $server_object->{rcon}  or die("BASTARDrcon: a Password is required\n");
-    $self->{server_host}   = $server_object->{address};
+    $self->{address}       = $server_object->{address};
+    $self->{ipAddr}        = inet_aton($server_object->{address});
     $self->{server_port}   = int($server_object->{port}) or die("BASTARDrcon: invalid Port \"" . $server_object->{port} . "\"\n");
 
     $self->{socket} = undef;
-    $self->{error} = "";
-
-    # Set up socket parameters
-    $self->{_ipaddr} = gethostbyname($self->{server_host}) or die("BASTARDrcon: could not resolve Host \"" . $self->{server_host} . "\"\n");
 
     return $self;
+}
+
+#
+# Execute an Rcon command and return the response
+#
+sub execute
+{
+    my ($self, $command) = @_;
+    return $self->_sendrecv($command);
+}
+
+#
+# Send and receive a package
+#
+sub _sendrecv
+{
+    my ($self, $cmd, $attempt) = @_;
+    $attempt //= 0;
+
+    if (!$self->{rcon_socket} || !defined fileno($self->{rcon_socket})) {
+        return "" unless $self->_open_socket();
+    }
+
+    my $sock   = $self->{rcon_socket};
+    my $ipaddr = $self->{ipAddr};
+    my $port   = $self->{server_port};
+    my $pass   = $self->{rcon_password};
+    
+    my $hisp   = sockaddr_in($port, $ipaddr);
+
+    my $challenge = $self->_get_rcon_challenge();
+    return $self->_healthcheck_socket() unless defined $challenge;
+
+    my $payload = "rcon $challenge \"$pass\" $cmd\n";
+    my $msg     = "\xFF\xFF\xFF\xFF" . $payload;
+
+    my $sent = send($sock, $msg, 0, $hisp);
+    return $self->_healthcheck_socket() unless defined $sent;
+
+    my $ans = $self->_read_multi_packets($TIMEOUT);
+    return $self->_healthcheck_socket() unless defined $ans;
+
+
+    # Empty reply → stale challenge → retry once
+    if ($ans =~ /No challenge/i && $attempt == 0) {
+        ::printEvent("RCON", "Challenge expired for $self->{address}:$self->{server_port}",1);
+        delete $self->{_rcon_challenge};
+        return $self->_sendrecv($cmd, 1);
+    }
+
+    return $ans;
 }
 
 #
@@ -54,12 +102,11 @@ sub new
 sub _open_socket
 {
     my ($self) = @_;
-    my $server_object = $self->{"server_object"};
 
     if (defined $self->{rcon_socket}) {
         close($self->{rcon_socket});
         delete $self->{rcon_socket};
-        ::printEvent("RCON", "Closing UDP socket on $server_object->{address}:$server_object->{port}: $!",1);
+        ::printEvent("RCON", "Closing UDP socket on $self->{address}:$self->{server_port}: $!",1);
     }
 
     delete $self->{_rcon_challenge};
@@ -67,15 +114,15 @@ sub _open_socket
     my $proto = $self->{_proto};
     socket($self->{rcon_socket}, PF_INET, SOCK_DGRAM, $proto);
     unless ($self->{"rcon_socket"}) {
-        ::printEvent("RCON", "Cannot setup UDP socket on $server_object->{address}:$server_object->{port}: $!",1);
+        ::printEvent("RCON", "Cannot setup UDP socket on $self->{address}:$self->{server_port}: $!",1);
         return 0;
     } else {
-        ::printEvent("RCON", " UDP socket is now open on $server_object->{address}:$server_object->{port}",1);
+        ::printEvent("RCON", " UDP socket is now open on $self->{address}:$self->{server_port}",1);
     }
 
     my $bindaddr = sockaddr_in(0, INADDR_ANY);
     if (!bind($self->{rcon_socket}, $bindaddr)) {
-        ::printEvent("RCON", " BASTARDrcon: rebuild bind: $!", 1);
+        ::printEvent("RCON", " Error BASTARDrcon: rebuild bind: $!", 1);
         return 0;
     }
 }
@@ -87,7 +134,7 @@ sub _get_rcon_challenge
     return $self->{_rcon_challenge} if defined $self->{_rcon_challenge};
 
     my $sock   = $self->{rcon_socket};
-    my $ipaddr = $self->{_ipaddr};
+    my $ipaddr = $self->{ipAddr};
     my $port   = $self->{server_port};
     my $hisp   = sockaddr_in($port, $ipaddr);
 
@@ -98,7 +145,7 @@ sub _get_rcon_challenge
 
     my $ans = $self->_read_multi_packets($TIMEOUT);
 
-    return undef if $ans eq "";
+    return undef if !$ans;
 
     my $challenge;
     if ($ans =~ /challenge\s+rcon\s+("?)(-?\d+)\1/i) {
@@ -135,6 +182,8 @@ sub _read_multi_packets
         $timeout = 0.20; # Next packet
     }
 
+    return undef unless $ans;
+
     # Strip HL headers
     $ans =~ s/\x00+$//g;                 # trailing crap
     $ans =~ s/^\xFF\xFF\xFF\xFFl//g;     # HL response
@@ -157,13 +206,14 @@ sub _healthcheck_socket
     my $sent = send($sock, $echo, 0, $loop_addr);
 
     if (!defined $sent) {
+        ::printEvent("RCON", " UDP socket can't send: stalled or crashed",1);
         return $self->_open_socket();
     }
 
     my $rin = "";
     vec($rin, fileno($sock), 1) = 1;
 
-    # Self ping
+    # loopback address
     my $ready = select(my $rout = $rin, undef, undef, 0.05);
     if ($ready) {
         my $buf = "";
@@ -171,17 +221,18 @@ sub _healthcheck_socket
         if ($buf eq $echo) {
             return 1;   # loopback OK
         }
+        ::printEvent("RCON", " UDP socket sent to self failed: stalled or crashed",1);
     }
 
     # HLDS simple ping
-    my $ipaddr = $self->{_ipaddr};
+    my $ipaddr = $self->{ipAddr};
     my $port   = $self->{server_port};
     my $hisp   = sockaddr_in($port, $ipaddr);
 
     my $ping = "\xFF\xFF\xFF\xFFping\n";
     $sent = send($sock, $ping, 0, $hisp);
-
     if (!defined $sent) {
+        ::printEvent("RCON", " UDP socket can't read: stalled or crashed",1);
         return $self->_open_socket();
     }
 
@@ -196,147 +247,8 @@ sub _healthcheck_socket
     }
 
     # No reply → socket or path is stale
-    ::printEvent("RCON", " UDP socket can't read: stalled or crashed",1);
+    ::printEvent("RCON", " UDP socket can't read: crashed",1);
     return $self->_open_socket();
-}
-
-#
-# Execute an Rcon command and return the response
-#
-sub execute
-{
-    my ($self, $command) = @_;
-    return $self->_sendrecv($command);
-}
-
-#
-# Send and receive a package
-#
-sub _sendrecv
-{
-    my ($self, $cmd, $attempt) = @_;
-    $attempt //= 0;
-
-    if (!$self->{rcon_socket} || !defined fileno($self->{rcon_socket})) {
-        return "" unless $self->_open_socket();
-    }
-
-    my $sock   = $self->{rcon_socket};
-    my $ipaddr = $self->{_ipaddr};
-    my $port   = $self->{server_port};
-    my $pass   = $self->{rcon_password};
-    my $hisp   = sockaddr_in($port, $ipaddr);
-
-    my $challenge = $self->_get_rcon_challenge();
-    return $self->_healthcheck_socket() unless defined $challenge;
-
-    my $payload = "rcon $challenge \"$pass\" $cmd\n";
-    my $msg     = "\xFF\xFF\xFF\xFF" . $payload;
-
-    send($sock, $msg, 0, $hisp)
-        or return $self->_healthcheck_socket();
-
-    my $ans = $self->_read_multi_packets($TIMEOUT);
-
-    # Empty reply → stale challenge → retry once
-    if ($ans eq "" && $attempt == 0) {
-        delete $self->{_rcon_challenge};
-        return $self->_sendrecv($cmd, 1);
-    }
-
-    return $ans;
-}
-
-#
-# Send a package
-#
-sub send_rcon
-{
-    my ($self, $id, $command, $string1, $string2) = @_;
-    my $tmp = pack("VVZ*Z*",$id,$command,$string1,$string2);
-    my $size = length($tmp);
-    if($size > 4096)
-    {
-        $self->{error} = "Command too long to send!";
-        return 1;
-    }
-    $tmp = pack("V", $size) .$tmp;
-
-    unless(defined(send($self->{"socket"},$tmp,0)))
-    {
-        die("BASTARDrcon: send $!");
-    }
-    return 0;
-}
-
-#
-#  Recieve a package
-#
-sub recieve_rcon
-{
-    my $self = shift;
-    my ($size, $id, $command, $msg);
-    my $rin = "";
-    my $tmp = "";
-    
-    vec($rin, fileno($self->{"socket"}), 1) = 1;
-    if(select($rin, undef, undef, 0.5))
-    {
-        while(length($size) < 4)
-        {
-            $tmp = "";
-            recv($self->{"socket"}, $tmp, (4-length($size)), 0);
-            $size .= $tmp;
-        }
-        $size = unpack("V", $size);
-        if($size < 10 || $size > 8192)
-        {
-            close($self->{"socket"});
-            $self->{error} = "illegal size $size ";
-            return (-1, -1, -1);
-        }
-        
-        while(length($id)<4)
-        {
-            $tmp = "";
-            recv($self->{"socket"}, $tmp, (4-length($id)), 0);
-            $id .= $tmp;
-        }
-        $id = unpack("V", $id);
-        $size = $size - 4;
-        while(length($command)<4)
-        {
-            $tmp ="";
-            recv($self->{"socket"}, $tmp, (4-length($command)),0);
-            $command.=$tmp;
-        }
-        $command = unpack("V", $command);
-        $size = $size - 4;
-        my $msg = "";
-        while($size >= 1)
-        {
-            $tmp = "";
-            recv($self->{"socket"}, $tmp, $size, 0);
-            $size -= length($tmp);
-            $msg .= $tmp;
-        }
-        my ($string1,$string2) = unpack("Z*Z*",$msg);
-        $msg = $string1.$string2;
-        return ($id, $command, $msg);
-    }
-    else
-    {
-        return (-1, -1, -1);
-    }
-}
-
-#
-# Get error message
-#
-sub error
-{
-    my ($self) = @_;
-    return $self->{"error"};
 }
 
 #
@@ -346,15 +258,15 @@ sub getPlayers
 {
     my ($self) = @_;
     my $status = $self->execute("status");
-    
+
     my @lines = split(/[\r\n]+/, $status);
-  
+
     my %players;
-  
+
     # HL1
     #      name userid uniqueid frag time ping loss adr
     # 1 "psychonic" 1 STEAM_0:1:4153990   0 00:33   13    0 192.168.5.115:27005
-  
+
     foreach my $line (@lines)
     {
         if ($line =~ /^\s*hostname\s*:\s*([\S].*)$/) {
@@ -389,11 +301,9 @@ sub getPlayers
             my $state    = "";
             my $address  = $7;
             my $port     = $8;
-            
+
             $uniqueid =~ s/^STEAM_[0-9]+?\://i;
-            
-            # &::printEvent("DEBUG", "USERID: '$userid', NAME: '$name', UNIQUEID: '$uniqueid', TIME: '$time', PING: '$ping', LOSS: '$loss', ADDRESS:'$address', CLI_PORT: '$port'", 1);
-            
+
             if ($::g_mode eq "NameTrack") {
               $players{$name}    = { 
                                    "Name"       => $name,
@@ -502,7 +412,7 @@ sub getPlayer
   }
   else
   {
-    $self->{"error"} = "No such player # $uniqueid";
+    ::printEvent("RCON", "getPlayer No such player: $uniqueid", 3);
     return 0;
   }
 }

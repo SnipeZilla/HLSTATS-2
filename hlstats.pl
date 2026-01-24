@@ -64,8 +64,6 @@ Getopt::Long::Configure ("bundling");
 binmode(STDOUT, ":utf8");
 binmode(STDIN, ":utf8");
 
-
-
 ##
 ## Functions
 ##
@@ -3065,6 +3063,7 @@ sub handleData
                     $g_servers{$server}->track_server_load();
                     $g_servers{$server}->{track_server_timestamp} = $ev_daemontime;
                     printEvent("MYSQL", "Insert new server load timestamp", 4);
+                    $g_servers{$server}->{num_players_load} = 0;
                 }
             } else { $g_servers{$server}->{track_server_timestamp} = $ev_daemontime };
 
@@ -3074,18 +3073,20 @@ sub handleData
             if ( defined $status_players{"host"}{"name"} ) {
                 # remove idling players
                 while (my ($pl, $player) = each %players_temp) {
-                    my $t = ($g_mode eq "LAN") ? 500 : 60;
                     my $userid    = $player->{userid};
                     my $uniqueid  = $player->{uniqueid};
+                    my $key = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
                     my $delayed   = (!$player->{is_bot} && (!$player->{"ping"} || !$player->{address})) ? 1:0;
-                    if ( $player->{timestamp} && (( ($ev_daemontime - $player->{timestamp}) > $t) || $delayed) ) {
-                        if (!defined($status_players{$uniqueid})) {
-                            printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
-                            removePlayer($server, $userid, $uniqueid);
-                        }  elsif ($delayed) {
-                            $player->getAddress(1);
-                            $player->flushDB();
+                    if (!defined($status_players{$key})) {
+                        printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
+                        removePlayer($server, $userid, $uniqueid);
+                    }  elsif ($delayed) {
+                        $player->{ping} = $status_players{$key}->{Ping};
+                        if ( !$player->{address} ) {
+                            $player->{address} = $status_players{$key}->{Address};
+                            $player->geoLookup();
                         }
+                        $player->flushDB();
                     }
                 }
                 # update map/hostname
@@ -3103,7 +3104,7 @@ sub handleData
 
     foreach my $pl (keys %g_preconnect) {
         my $player = $g_preconnect{$pl};
-        my $t = 600;
+        my $t = 300;
         if ( ($ev_unixtime - $player->{"timestamp"}) > $t ) {
             printEvent("PLAYER", "Clearing pre-connect entry with key ".$pl,3);
             delete($g_preconnect{$pl});
@@ -3124,20 +3125,6 @@ sub handleData
         }
 
     }
-    
-    # No DATA
-    if ($udpTime+$udpPulse <=  $ev_daemontime) {
-        my $_s = $ev_daemontime-$udpTime;
-        printEvent("HLSTATSZ", "[UDP] No data since $_s seconds",2);
-        $udpPulse += 120;
-    }
-    if ($httpTime+$httpPulse <=  $ev_daemontime) {
-        my $_s = $ev_daemontime-$httpTime;
-        printEvent("HLSTATSZ", "[HTTP] No data since $_s seconds",2);
-        $httpPulse += 120;
-    }
-
-    $import_logs_count++ if ($g_stdin);
 
     # CRONJOB
     if ($path_perl ne "")
@@ -3147,6 +3134,8 @@ sub handleData
         run_daily_task($yesterday, \$awards_today, $path_awards);
         run_daily_task($yesterday, \$bans_today, $path_bans);
     }
+
+    $import_logs_count++ if ($g_stdin);
 
 }
 
@@ -3595,12 +3584,6 @@ sub handle_http {
 
 # Loop start
 if ($g_stdin == 0) {
-    # port open?
-    $udpTime   = time();
-    $udpPulse  = 120;
-    $httpTime  = time();
-    $httpPulse = 120;
-
     # init UDP
     $udp_socket = IO::Socket::INET->new(
         Proto     => "udp",
@@ -3617,8 +3600,6 @@ if ($g_stdin == 0) {
         $loop->reactor->io($udp_socket => sub {
             $ev_unixtime   = time();
             $ev_daemontime = $ev_unixtime;
-            $udpTime       = $ev_unixtime;
-            $udpPulse      = 120;
             my ($reactor, $fd, $readable) = @_;
             my $data;
             my $peer_addr = recv($udp_socket, $data, 1024, 0);
@@ -3650,23 +3631,15 @@ if ($g_stdin == 0) {
         $daemon->on(request => sub {
             $ev_unixtime   = time();
             $ev_daemontime = $ev_unixtime;
-            $httpTime      = $ev_unixtime;
-            $httpPulse     = 120;
-
             my ($daemon, $tx) = @_;
-
             my $addr = $tx->req->headers->header('X-Server-Addr') // ($tx->remote_address . ":" . $tx->remote_port);
-
             my $body = $tx->req->body // '';
-
             $tx->res->code(200)->body("OK\n");
             $tx->resume;
-
             my @lines = split(/\r?\n/, $body);
             for my $data (@lines) {
                 next unless defined $data && length $data;
                 $data = "L $data" unless $data =~ /^L /;
-
                 push @HTTPQ, [$addr, $data];
             }
 
@@ -3681,7 +3654,7 @@ if ($g_stdin == 0) {
 
     # Handle Data
     my $handlingdata = 0;
-    Mojo::IOLoop->recurring(2 => sub {
+    Mojo::IOLoop->recurring(1 => sub {
         return if $handlingdata;
         $handlingdata = 1;
         handleData();
