@@ -3090,7 +3090,7 @@ sub handleData
                     }
                 }
                 # update map/hostname
-                $g_servers{$server}->get_map(undef,$status_players{"host"}) if ( defined $status_players{"host"}{"map"} );
+                $g_servers{$server}->get_map(undef,$status_players{"host"}) if $status_players{"host"}{"map"};
             }
             $g_servers{$server}->{next_timeout}=$ev_daemontime+30+rand(30);
         }

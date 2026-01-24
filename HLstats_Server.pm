@@ -53,6 +53,7 @@ sub new
 
     $self->{lines}         = 0;
     $self->{map}           = "";
+    $self->{server_map}    = "";
     $self->{numplayers}    = 0;
     $self->{num_trackable_players} = 0;
     $self->{num_players_load} = 0;
@@ -565,9 +566,7 @@ sub get_map
     my ($self, $fromupdate, $host) = @_;
 
     if (!$::g_stdin) {
-
-        if ( ( (time() - $self->{last_check}) > 120 ) ||
-               ( $host && $self->{map} ne $host{"map"} && length($host{"map"}) ) ) {
+        if ( ( (time() - $self->{last_check}) > 120 ) || ( $self->{map} ne $self->{server_map} ) || ( defined $host->{map} ) ) {
 
             $self->{last_check} = time();
             my $temp_map        = "";
@@ -579,10 +578,10 @@ sub get_map
             if ($self->{rcon_obj}) {
 
                 if (defined $host) {
-                    $temp_map          = $host{"map"};
-                    $temp_maxplayers   = $host{"max_players"};
-                    $servhostname      = $host{"name"};
-                    $difficulty        = $host{"difficulty"} // 0;
+                    $temp_map          = $host->{"map"};
+                    $temp_maxplayers   = $host->{"max_players"};
+                    $servhostname      = $host->{"name"};
+                    $difficulty        = $host->{"difficulty"} // 0;
                 } else {
                     ($temp_map, $temp_maxplayers, $servhostname, $difficulty) = $self->rcon_getStatus();
                 }
@@ -613,7 +612,7 @@ sub get_map
 
             }
 
-            if ($update > 0 && $fromupdate // 0 == 0) {
+            if ($update > 0) {
                 $self->updateDB();
             }
 
@@ -1029,8 +1028,7 @@ sub updateDB
 sub flushDB
 {
     my ($self) = @_;
-       $self->get_map(1);
-    
+
     my $serverid      = $self->{id};
 
     my $result = ::exec_cache(
@@ -1041,16 +1039,20 @@ sub flushDB
             suicides,
             rounds,
             ct_shots+ts_shots as shots,
-            ct_hits+ts_hits as hits
+            ct_hits+ts_hits as hits,
+            act_map
         FROM
             hlstats_Servers
         WHERE
             serverId=?",
         $self->{id}
         );
-    ($self->{total_kills}, $self->{total_headshots}, $self->{total_suicides},$self->{total_rounds},$self->{total_shots},$self->{total_hits}) = $result->fetchrow_array();
+    ($self->{total_kills}, $self->{total_headshots}, $self->{total_suicides},$self->{total_rounds},$self->{total_shots},$self->{total_hits},$self->{server_map}) = $result->fetchrow_array();
     $result->finish;
 
+    if ( $self->{server_map} ne $self->{map} ) {
+        $self->get_map(1);
+    }
     my $result = ::exec_cache(
         "get_player_count",
         "SELECT count(*) as players FROM hlstats_Players WHERE game=? AND hideranking <> 1 AND lastAddress <> ''",
@@ -1125,6 +1127,7 @@ sub flushDB
     );
     ::exec_cache("update_server_stats", $query, @vals);
 
+    $self->set("server_map", $self->{map});
     $self->set("rounds", 0);
     $self->set("kills", 0);
     $self->set("suicides", 0);
