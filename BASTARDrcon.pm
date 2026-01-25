@@ -271,8 +271,10 @@ sub getPlayers
     # 2 "SnipeZilla" 2 BOT  11  1:37:35    0    0
     foreach my $line (@lines)
     {
-        $line =~ s/^[^a-zA-Z\#]+//;
-        $line =~ s/^l(?=(hostname|map|players|\#))//;
+        $line =~ s/[\x00-\x1F\x80-\xFF]+//g;                    # remove binary junk
+        $line =~ s/^l(?=(hostname|map|players|\#))//;           # fix lhostname, l#, etc.
+        $line =~ s/(BOT\s+\d+)\s+[^\d:]+(\d+:\d+:\d+)/$1 $2/;   # fix frag→time corruption
+        $line =~ s/(\d+:\d+:\d+)l/$1/;                          # fix stray 'l' after time
 
         if ($line =~ /^\s*hostname\s*:\s*([\S].*)$/) {
             $players{"host"}{"name"} = $1; # host
