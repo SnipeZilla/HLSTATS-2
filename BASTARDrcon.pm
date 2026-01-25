@@ -13,9 +13,9 @@ package BASTARDrcon;
 #    https://forums.alliedmods.net/forumdisplay.php?f=156
 
 use strict;
+
 use sigtrap;
 use Socket qw(PF_INET SOCK_DGRAM INADDR_ANY sockaddr_in inet_aton);
-use Sys::Hostname;
 use bytes;
 
 ##
@@ -258,90 +258,84 @@ sub getPlayers
 {
     my ($self) = @_;
     my $status = $self->execute("status");
+    my $server = "$self->{server_object}->{address}:$self->{server_object}->{port}";
 
     my @lines = split(/[\r\n]+/, $status);
 
     my %players;
+    my $md5;
 
     # HL1
     #      name userid uniqueid frag time ping loss adr
     # 1 "psychonic" 1 STEAM_0:1:4153990   0 00:33   13    0 192.168.5.115:27005
-
+    # 2 "SnipeZilla" 2 BOT  11  1:37:35    0    0
     foreach my $line (@lines)
     {
+        $line =~ s/^[^a-zA-Z\#]+//;
+        $line =~ s/^l(?=(hostname|map|players|\#))//;
+
         if ($line =~ /^\s*hostname\s*:\s*([\S].*)$/) {
             $players{"host"}{"name"} = $1; # host
         }
-        elsif ($line =~ /^Game Time\s*(\d*?:?\d+:\d+),\s*Mod\s*"([^"]+)",\s*Map\s*"([^"]+)"\s*$/) {
-            $players{"host"}{"map"} = $3; # map
-        }
-        elsif ($line =~ /loaded spawngroup.*?\[1:\s*([^\s]+)\s*/) {
-            $players{"host"}{"map"} = $1;  # workshop or map
+        elsif ($line =~ /\s*map\s*:\s*([\S]+).*$/) {
+            $players{"host"}{"map"} = $1; # map
         }
         elsif ($line =~ /^\s*players\s*:\s*\d+[^(]+\((\d+)\/?\d?\smax.*$/) {
             $players{"host"}{ "max_players"} = $1;
         }
-        elsif ($line =~ /^\#\s*\d+\s+
-                    "(.+)"\s+                    # name
-                    (\d+)\s+                     # userid
-                    ([^\s]+)\s+\d+\s+            # uniqueid
-                    ([\d:]+)\s+                  # time
-                    (\d+)\s+                     # ping
-                    (\d+)\s+                     # loss
-                    ([^:]+):                     # addr
-                    (\S+)                        # port
-                    $/x)
+        elsif ($line =~ /^\#\s*(\d+)\s+        # slot
+                         "(.+?)"\s+            # name
+                         (\d+)\s+              # userid
+                         ([^\s]+)\s+           # uniqueid (BOT or STEAM_x)
+                         \d+\s+                # frag (ignored)
+                         ([\d:]+)\s+           # time
+                         (\d+)\s+              # ping
+                         (\d+)                 # loss
+                         (?:\s+([^:]+):(\S+))? # optional addr:port
+                         \s*$/x)
         {
-            my $name     = $1;
-            my $userid   = $2;
-            my $uniqueid = $3;
-            my $time     = $4;
-            my $ping     = $5;
-            my $loss     = $6;
+            my $slot     = $1;
+            my $name     = $2;
+            my $userid   = $3;
+            my $uniqueid = $4;
+            my $time     = $5;
+            my $ping     = $6;
+            my $loss     = $7;
+            my $address  = $8 // "";
+            my $port     = $9 // "";
             my $state    = "";
-            my $address  = $7;
-            my $port     = $8;
 
-            $uniqueid =~ s/^STEAM_[0-9]+?\://i;
-
-            if ($::g_mode eq "NameTrack") {
-              $players{$name}    = { 
-                                   "Name"       => $name,
-                                   "UserID"     => $userid,
-                                   "UniqueID"   => $uniqueid,
-                                   "Time"       => $time,
-                                   "Ping"       => $ping,
-                                   "Loss"       => $loss,
-                                   "State"      => $state,
-                                   "Address"    => $address,
-                                   "ClientPort" => $port
-                                 };
-            } elsif ($::g_mode eq "LAN") {
-              $players{$address} = { 
-                                   "Name"       => $name,
-                                   "UserID"     => $userid,
-                                   "UniqueID"   => $uniqueid,
-                                   "Time"       => $time,
-                                   "Ping"       => $ping,
-                                   "Loss"       => $loss,
-                                   "State"      => $state,
-                                   "Address"    => $address,
-                                   "ClientPort" => $port
-                                 };
-            } else {
-              $players{$uniqueid} = { 
-                                   "Name"       => $name,
-                                   "UserID"     => $userid,
-                                   "UniqueID"   => $uniqueid,
-                                   "Time"       => $time,
-                                   "Ping"       => $ping,
-                                   "Loss"       => $loss,
-                                   "State"      => $state,
-                                   "Address"    => $address,
-                                   "ClientPort" => $port
-                                  };
+            $uniqueid =~ s/^STEAM_[0-9]+://i;
+            if ($uniqueid eq 'BOT') {
+                my $md5;
+                $md5 = Digest::MD5->new;
+                $md5->add($name);
+                $md5->add($server);
+                $uniqueid = "BOT:" . $md5->hexdigest;
             }
+
+            my $key;
+            if ($::g_mode eq "NameTrack") {
+                $key = $name;
+            } elsif ($::g_mode eq "LAN") {
+                $key = $address || $userid;
+            } else {
+                $key = $uniqueid;
+            }
+
+            $players{$key} = {
+                "Name"       => $name,
+                "UserID"     => $userid,
+                "UniqueID"   => $uniqueid,
+                "Time"       => $time,
+                "Ping"       => $ping,
+                "Loss"       => $loss,
+                "State"      => $state,
+                "Address"    => $address,
+                "ClientPort" => $port,
+            };
         }
+
     }
     return %players;
 }

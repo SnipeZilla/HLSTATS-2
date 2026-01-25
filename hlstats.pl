@@ -3070,12 +3070,12 @@ sub handleData
             # Clean up
             my %status_players = $g_servers{$server}->rcon_getplayers();
             my %players_temp   = %{ $g_servers{$server}->{"srv_players"} };
-            if ( defined $status_players{"host"}{"name"} ) {
+            if ( defined $status_players{"host"}->{"name"} ) {
                 # remove idling players
                 while (my ($pl, $player) = each %players_temp) {
                     my $userid    = $player->{userid};
                     my $uniqueid  = $player->{uniqueid};
-                    my $key = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
+                    my $key       = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
                     my $delayed   = (!$player->{is_bot} && (!$player->{"ping"} || !$player->{address})) ? 1:0;
                     if (!defined($status_players{$key})) {
                         printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
@@ -3090,7 +3090,7 @@ sub handleData
                     }
                 }
                 # update map/hostname
-                $g_servers{$server}->get_map(undef,$status_players{"host"}) if $status_players{"host"}{"map"};
+                $g_servers{$server}->get_map(undef,$status_players{"host"}) if $status_players{"host"}->{"map"};
             }
             $g_servers{$server}->{next_timeout}=$ev_daemontime+30+rand(30);
         }
@@ -3654,7 +3654,7 @@ if ($g_stdin == 0) {
 
     # Handle Data
     my $handlingdata = 0;
-    Mojo::IOLoop->recurring(1 => sub {
+    Mojo::IOLoop->recurring(3 => sub {
         return if $handlingdata;
         $handlingdata = 1;
         handleData();

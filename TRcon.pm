@@ -421,6 +421,7 @@ sub getPlayers
     my @lines = split(/[\r\n]+/, $status);
     my %players;
     my %userid_to_slot;
+    my $md5;
 
     # HL2 standard
     # userid name uniqueid connected ping loss state adr
@@ -484,7 +485,7 @@ sub getPlayers
             $uniqueid =~ s/^STEAM_[0-9]+?\://i;
             if ($time eq 'BOT') {
                 $md5 = Digest::MD5->new;
-                $md5->add($time);
+                $md5->add($name);
                 $md5->add($server);
                 $uniqueid = "BOT:" . $md5->hexdigest;
             }
@@ -520,7 +521,7 @@ sub getPlayers
             my ($userid, $time, $ping, $loss, $state, $address, $port, $name) = ($1, $2, $3, $4, $5, ($7 // ""), ($8 // ""), $9);
             if ($time eq 'BOT') {
                 $md5 = Digest::MD5->new;
-                $md5->add($time);
+                $md5->add($name);
                 $md5->add($server);
                 $uniqueid = "BOT:" . $md5->hexdigest;
             }
