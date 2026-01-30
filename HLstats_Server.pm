@@ -168,7 +168,6 @@ sub new
     $self->{next_plyr_flush}               = 0;
     $self->{needsupdate}                   = 0;
     $self->{do_stats}                      = 0;
-    $self->{update_ping}                   = 0;
 
     $self->set_play_game($realgame);
 
@@ -378,7 +377,6 @@ sub init_rcon
 
        if ($self->{rcon_obj}) {
         ::printEvent ("HLSATSZ", "Connecting to rcon on $server_ip:$server_port ... ok",1);
-        ::printEvent("HLSTATSZ", "Server running map: ".$self->get_map(), 1);
         if ($::g_mode eq "LAN") {
             $self->get_lan_players();
         }
@@ -563,10 +561,10 @@ sub dostats
 
 sub get_map
 {
-    my ($self, $fromupdate, $host) = @_;
+    my ($self, $host) = @_;
 
     if (!$::g_stdin) {
-        if ( ( (time() - $self->{last_check}) > 120 ) || ( $self->{map} ne $self->{server_map} ) || ( defined $host->{map} ) ) {
+        if ( ( (time() - $self->{last_check}) > 120 ) || $fromupdate || ( $self->{map} ne $self->{server_map} ) || ( defined $host->{map} ) ) {
 
             $self->{last_check} = time();
             my $temp_map        = "";
@@ -622,40 +620,6 @@ sub get_map
 
     return $self->{map};
 
-}
-
-sub update_players_pings
-{
-    my ($self) = @_;
-
-    if ($self->{num_trackable_players} < $self->{minplayers}) 
-    {
-        ::printEvent("RCON", "(IGNORED) NOT MIN PLAYERS: Update_player_pings",3);
-    }
-    else
-    {
-        ::printEvent("RCON", "Update Player pings", 3);
-        my %players = $self->rcon_getplayers();
-        while ( my($pl, $player) = each(%{$self->{srv_players}}) )
-        {
-            my $uniqueid = $player->{uniqueid};
-            if (defined($players{$uniqueid})) 
-            {
-                if ($player->{is_bot} == 0 && ( $player->{userid} > 0 || $self->{play_game} == CS2() ) )
-                {
-                    my $ping = $players{$uniqueid}->{"Ping"};
-                    $player->set("ping", $ping);
-                    if ($ping > 0) {
-                        ::recordEvent(
-                            "Latency", 0,
-                            $player->{playerid},
-                            $ping
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
 
 sub get_lan_players
@@ -1050,9 +1014,6 @@ sub flushDB
     ($self->{total_kills}, $self->{total_headshots}, $self->{total_suicides},$self->{total_rounds},$self->{total_shots},$self->{total_hits},$self->{server_map}) = $result->fetchrow_array();
     $result->finish;
 
-    if ( $self->{server_map} ne $self->{map} ) {
-        $self->get_map(1);
-    }
     my $result = ::exec_cache(
         "get_player_count",
         "SELECT count(*) as players FROM hlstats_Players WHERE game=? AND hideranking <> 1 AND lastAddress <> ''",
@@ -1176,8 +1137,8 @@ sub update_server_loc {
             my $longitude    = $geoLocation    ? $geoLocation->longitude()  : undef;
 
             if (defined $longitude && defined $latitude) {
-                $servcity    = $city_name // '';
-                $servcountry = $country_name // '';
+                $servcity    = $city_name // 'Datacenter';
+                $servcountry = $country_name // 'Unknown';
                 $servlat = $latitude;
                 $servlng = $longitude;
 

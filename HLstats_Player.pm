@@ -449,16 +449,16 @@ sub flushDB {
     my $is_bot         = $self->{is_bot};
 
     # Snapshot frequently used fields
-    my $name       = ($::db_driver eq 'mysql') ? $self->{name} : decode("UTF-8", $self->{name});
-    my $clan       = $self->{clan} + 0;
-    my $kills      = $self->{kills};
-    my $deaths     = $self->{deaths};
-    my $suicides   = $self->{suicides};
-    my $skill      = $self->{skill} // 0; $skill = 0 if $skill < 0;
-    my $headshots  = $self->{headshots};
-    my $shots      = $self->{shots};
-    my $hits       = $self->{hits};
-    my $teamkills  = $self->{teamkills};
+    my $name          = ($::db_driver eq 'mysql') ? $self->{name} : decode("UTF-8", $self->{name});
+    my $clan          = $self->{clan} + 0;
+    my $kills         = $self->{kills};
+    my $deaths        = $self->{deaths};
+    my $suicides      = $self->{suicides};
+    my $skill         = $self->{skill} // 0; $skill = 0 if $skill < 0;
+    my $headshots     = $self->{headshots};
+    my $shots         = $self->{shots};
+    my $hits          = $self->{hits};
+    my $teamkills     = $self->{teamkills};
 
     my $team          = $self->{team};
     my $map_kills     = $self->{map_kills};
@@ -469,19 +469,19 @@ sub flushDB {
     my $map_hits      = $self->{map_hits};
     my $steamid       = $self->{plain_uniqueid};
     my $address       = $self->{address};
+    my $ping          = $self->{ping};
 
     my $is_dead       = $self->{is_dead};
     my $has_bomb      = $self->{has_bomb};
-    my $ping          = $self->{ping};
     my $connected     = $self->{connect_time};
     my $skill_change  = $self->{session_skill};
     
     my $death_streak  = $self->{death_streak};
     my $kill_streak   = $self->{kill_streak};
 
-    my $is_stdin   = $::g_stdin ? 1 : 0;
-    my $now        = $is_stdin ? $::ev_unixtime : time();
-    my $last_upd   = $self->{last_update} // 0;
+    my $is_stdin      = $::g_stdin ? 1 : 0;
+    my $now           = $is_stdin ? $::ev_unixtime : time();
+    my $last_upd      = $self->{last_update} // 0;
     ::printEvent("MYSQL", "Flushing player $name ($playerid) <$server_address> to database...",4);
 
     # Compute connect-time increment
@@ -522,13 +522,13 @@ sub flushDB {
     my $last_skill_change      = $self->{day_skill_change};
 
     # --- Players update (bot vs human) ---
-    my $lastAddress = ($ignore_bots && $is_bot ? 1 : 0);
     my $hideranking = ($ignore_bots && $is_bot ? 1 : 0);
 
     my $query = q{
         UPDATE hlstats_Players
            SET connection_time  = connection_time + ?,
-               lastAddress      = CASE WHEN ? = 1 THEN '' ELSE lastAddress END,
+               lastAddress      = ?,
+               lastPing         = ?,
                lastName         = ?,
                clan             = ?,
                kills            = kills + ?,
@@ -548,7 +548,7 @@ sub flushDB {
          WHERE playerId = ?
     };
     ::exec_cache("player_flushdb_player_2", $query,
-        $add_connect_time, $lastAddress, $name, $clan, $kills, $deaths, $suicides, $skill,
+        $add_connect_time, $address, $ping, $name, $clan, $kills, $deaths, $suicides, $skill,
         $headshots, $shots, $hits, $teamkills, $::ev_unixtime, $last_skill_change,
         $death_streak, $death_streak, $kill_streak , $kill_streak, $hideranking, $playerid
     );
@@ -717,23 +717,10 @@ sub getAddress
         } else { $haveAddress = 0; }
     }
 
-    if ($haveAddress == 1)
-    {
-        # Update player IP address in database
-        my $query = "
-            UPDATE
-                hlstats_Players
-            SET
-                lastAddress=?
-            WHERE
-                playerId=?
-        ";
-        my @vals = ($self->{address}, $self->{playerid});
-        ::exec_cache("player_update_lastaddress", $query, @vals);
-        ::printEvent("MYSQL","Updated IP for ".$self->{playerid}." to ".$self->{address},4);
-        
+    if ($haveAddress == 1) {
         $self->geoLookup();
     }
+
     return 1;
 }
 

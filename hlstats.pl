@@ -35,7 +35,6 @@ $opt_libdir = "./";
 ################################################################################
 ## No need to edit below this line
 ##
-
 use Getopt::Long;
 use Time::Local;
 use DBI;
@@ -257,7 +256,7 @@ sub recordEvent {
 
     my $server    = $g_servers{$s_addr} or return;
     my $server_id = $server->{id};
-    my $map       = $server->get_map // '';
+    my $map       = $server->get_map() // '';
     my $ts        = $ev_unixtime;  # unix seconds
 
     my @values = ("FROM_UNIXTIME($ts)", $server_id, quote_sql($map));
@@ -1389,10 +1388,10 @@ sub readDatabaseConfig()
     # CRONJOB
     if ($path_perl ne "")
     {
-        my $yesterday = query_now("SELECT value FROM hlstats_Options WHERE keyname = 'awards_d_date'");
-        $awards_today = $yesterday->fetchrow_array;
+        my $awards_d_date = query_now("SELECT value FROM hlstats_Options WHERE keyname = 'awards_d_date'");
+        $awards_today = $awards_d_date->fetchrow_array;
         $bans_today = $awards_today;
-        $yesterday->finish;
+        $awards_d_date->finish;
         my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time() - 86400);
         my $yesterday = sprintf("%04d-%02d-%02d", $year+1900, $mon+1, $mday);
         printEvent("CRONJOB", $yesterday ne $awards_today ? "Daily tasks are outdated" :"Daily tasks are up to date", 1);
@@ -3004,11 +3003,7 @@ EOT
 
     if (($g_stdin == 0) && defined($g_servers{$s_addr})) {
         my $s_lines = $g_servers{$s_addr}->{lines};
-        # get ping from players
-        if ($s_lines % 1000 == 0) {
-            $g_servers{$s_addr}->{update_ping} = 1;
-        }
-    
+
         if ($g_servers{$s_addr}->{show_stats} == 1) {
             # show stats
             if ($s_lines % 2500 == 40) {
@@ -3042,12 +3037,6 @@ sub handleData
                 }
             }
             $g_servers{$server}->{next_plyr_flush} = $ev_daemontime + 15+int(rand(15));
-        }
-
-        # get ping from players
-        if ($g_servers{$server}->{update_ping} == 1) {
-            $g_servers{$server}->update_players_pings();
-            $g_servers{$server}->{update_ping} = 0;
         }
 
         # show stats
@@ -3090,7 +3079,7 @@ sub handleData
                     }
                 }
                 # update map/hostname
-                $g_servers{$server}->get_map(undef,$status_players{"host"}) if $status_players{"host"}->{"map"};
+                $g_servers{$server}->get_map($status_players{"host"}) if $status_players{"host"}->{"map"};
             }
             $g_servers{$server}->{next_timeout}=$ev_daemontime+30+rand(30);
         }
@@ -3426,6 +3415,29 @@ if ($opt_help) {
 DB_connect();
 readDatabaseConfig();
 buildEventInsertData();
+
+# Ensure hlstats_Players.lastPing exists
+my $col_exists = query_now("
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'hlstats_Players'
+      AND COLUMN_NAME = 'lastPing'
+");
+
+my ($exists) = $col_exists->fetchrow_array;
+
+if (!$exists) {
+   printEvent("HLSTATSZ", "++ Adding lastPing column to hlstats_Players...",1);
+
+    exec_now("
+        ALTER TABLE hlstats_Players
+        ADD COLUMN lastPing INT UNSIGNED NULL DEFAULT NULL
+        AFTER lastAddress
+    ");
+
+    printEvent("HLSTATSZ", "++ lastPing column added.",1);
+}
 
 if ($opt_version) {
     print "\nhlstats.pl (HLstatsZ) Version $g_version\n"

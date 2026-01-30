@@ -285,56 +285,56 @@ sub getPlayers
         elsif ($line =~ /^\s*players\s*:\s*\d+[^(]+\((\d+)\/?\d?\smax.*$/) {
             $players{"host"}{ "max_players"} = $1;
         }
-        elsif ($line =~ /^\#\s*(\d+)\s+        # slot
-                         "(.+?)"\s+            # name
-                         (\d+)\s+              # userid
-                         ([^\s]+)\s+           # uniqueid (BOT or STEAM_x)
-                         \d+\s+                # frag (ignored)
-                         ([\d:]+)\s+           # time
-                         (\d+)\s+              # ping
-                         (\d+)                 # loss
-                         (?:\s+([^:]+):(\S+))? # optional addr:port
-                         \s*$/x)
+        elsif ($line =~ /
+            ^\#\s*\d+\s+          # slot
+            "(.+?)"\s+            # $1 name
+            (\d+)\s+              # $2 userid
+            BOT\b                 # uniqueid = BOT
+            /x)
         {
-            my $slot     = $1;
-            my $name     = $2;
-            my $userid   = $3;
-            my $uniqueid = $4;
-            my $time     = $5;
-            my $ping     = $6;
-            my $loss     = $7;
-            my $address  = $8 // "";
-            my $port     = $9 // "";
-            my $state    = "";
-
-            $uniqueid =~ s/^STEAM_[0-9]+://i;
-            if ($uniqueid eq 'BOT') {
-                my $md5;
-                $md5 = Digest::MD5->new;
-                $md5->add($name);
-                $md5->add($server);
-                $uniqueid = "BOT:" . $md5->hexdigest;
-            }
-
-            my $key;
-            if ($::g_mode eq "NameTrack") {
-                $key = $name;
-            } elsif ($::g_mode eq "LAN") {
-                $key = $address || $userid;
-            } else {
-                $key = $uniqueid;
-            }
+            my ($name, $userid) = ($1, $2);
+            $md5 = Digest::MD5->new;
+            $md5->add($name);
+            $md5->add($server);
+            my $uniqueid = "BOT:" . $md5->hexdigest;
+            my $key = ($::g_mode eq "NameTrack") ? $name : $uniqueid;
+            next unless $key;
 
             $players{$key} = {
                 "Name"       => $name,
                 "UserID"     => $userid,
                 "UniqueID"   => $uniqueid,
-                "Time"       => $time,
+                "Ping"       => 0,
+                "Address"    => ""
+            };
+        }
+        elsif ($line =~ /^\#\s*\d+\s+          # slot
+                         "(.+?)"\s+            # $1 name
+                         (\d+)\s+              # $2 userid
+                         ([^\s]+)\s+           # $3 uniqueid (BOT or STEAM_x)
+                         \d+\s+                # frag (ignored)
+                         [\d:]+\s+             # time
+                         (\d+)\s+              # $4 ping
+                         \d+                   # loss
+                         (?:\s+([^:]+):\d+)?   # $5 optional addr:port
+                         \s*$/x)
+        {
+            my $name     = $1;
+            my $userid   = $2;
+            my $uniqueid = $3;
+            my $ping     = $4;
+            my $address  = $5 // "";
+
+            $uniqueid =~ s/^STEAM_[0-9]+://i;
+
+            my $key = ($::g_mode eq "NameTrack") ? $name : ($::g_mode eq "LAN" && $address) ? "$address/$userid/$name" : $uniqueid;
+
+            $players{$key} = {
+                "Name"       => $name,
+                "UserID"     => $userid,
+                "UniqueID"   => $uniqueid,
                 "Ping"       => $ping,
-                "Loss"       => $loss,
-                "State"      => $state,
-                "Address"    => $address,
-                "ClientPort" => $port,
+                "Address"    => $address
             };
         }
 

@@ -438,7 +438,6 @@ sub getPlayers
     # 0:321:"snipezilla"
 
    foreach my $line (@lines) {
-
         # 'users' save list for later
         if ($line =~ /^(\d+):(\d+):"([^"]+)"$/) {
             $userid_to_slot{$2} = $1; 
@@ -465,60 +464,70 @@ sub getPlayers
             $players{"host"}{ "max_players"} = $1;
         }
         elsif ($line =~ /
-                        ^(?:\#\s*)?     # not for cs2
-                        (\d+)\s+        # userid
-                        (?:\d+\s+|)     # extra number in L4D, not sure what this is??
-                        "(.+)"\s+       # name
-                        (\S+)\s+        # uniqueid
-                        ([\d:]+)\s+     # time
-                        (\d+)\s+        # ping
-                        (\d+)\s+        # loss
-                        ([A-Za-z]+)\s+  # state
-                        (?:\d+\s+|)     # rate (L4D only)
-                        ([^:]+):        # addr
-                        (\S+)           # port
-                        $/x)
+            ^\#\s*                # not for cs2
+            (\d+)\s+              # $1 userid
+            (?:\d+\s+)?           # optional L4D extra number
+            "(.+?)"\s+            # $2 name
+            BOT\b                 # uniqueid = BOT
+            /x)
         {
+            my ($userid, $name) = ($1, $2);
+            $md5 = Digest::MD5->new;
+            $md5->add($name);
+            $md5->add($server);
+            $uniqueid = "BOT:" . $md5->hexdigest;
+            my $key = $uniqueid;
+            next unless $key;
 
-            my ($userid, $name, $uniqueid, $time, $ping, $loss, $state, $address, $port) = ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+            $players{$key} = {
+                "Name"       => $name,
+                "UserID"     => $userid,
+                "UniqueID"   => $uniqueid,
+                "Ping"       => 0,
+                "Address"    => ""
+            };
+        }
+        elsif ($line =~ /
+            ^\#\s*                # not for cs2
+            (\d+)\s+              # $1 userid
+            (?:\d+\s+)?           # optional L4D extra number
+            "(.+?)"\s+            # $2 name
+            (\S+)\s+              # $3 uniqueid (STEAM_x or other)
+            [\d:]+\s+             # time
+            (\d+)\s+              # $4 ping
+            \d+\s+                # loss
+            [A-Za-z]+\s+          # state
+            (?:\d+\s+)?           # optional L4D rate
+            (?:([^:]+):(\d+))?    # $5 addr
+            \s*$
+            /x)
+        {
+            my ($userid, $name, $uniqueid, $ping, $address) = ($1, $2, $3, $4, $5 // "");
             $uniqueid =~ s!\[U:1:(\d+)\]!($1 % 2).':'.int($1 / 2)!eg;
             $uniqueid =~ s/^STEAM_[0-9]+?\://i;
-            if ($time eq 'BOT') {
-                $md5 = Digest::MD5->new;
-                $md5->add($name);
-                $md5->add($server);
-                $uniqueid = "BOT:" . $md5->hexdigest;
-            }
-            my $key = ($::g_mode eq "NameTrack") ? $name : ($::g_mode eq "LAN") ? $address : $uniqueid;
+            my $key = ($::g_mode eq "NameTrack") ? $name : ($::g_mode eq "LAN" && $address) ? "$address/$userid/$name" : $uniqueid;
             next unless $key;
             $players{$key} = {
                 "Name"       => $name,
                 "UserID"     => $userid,
                 "UniqueID"   => $uniqueid,
-                "Time"       => $time,
                 "Ping"       => $ping,
-                "Loss"       => $loss,
-                "State"      => $state,
                 "Address"    => $address,
-                "ClientPort" => $port
             };
 
         } elsif ($line =~ /
-                          (\d+)\s+            # $1 userid
-                          ([\d:]+?|BOT)\s+    # $2 connected 
-                          (\d+)\s+            # $3 ping
-                          (\d+)\s+            # $4 loss
-                          ([A-Za-z]+)\s+      # $5 state
-                          (\d+)\s+            # $6 extra
-                          (?:                 
-                              ([^:]+):        # $7 addr
-                              (\d+)\s+        # $8 port
-                          )?                  
-                          '(.*?)'             # $9 name
+                          (\d+)\s+              # $1 userid
+                          ([\d:]+?|BOT)\s+      # $2 connected 
+                          (\d+)\s+              # $3 ping
+                          \d+\s+                # loss
+                          [A-Za-z]+\s+          # state
+                          \d+\s+                # extra
+                          (?:([^:]+):(\d+)\s+)? # $4 addr
+                          '(.*?)'               # $6 name
                           $/x)
         {
   
-            my ($userid, $time, $ping, $loss, $state, $address, $port, $name) = ($1, $2, $3, $4, $5, ($7 // ""), ($8 // ""), $9);
+            my ($userid, $time, $ping, $address, $name) = ($1, $2, $3, $4 // "", $6);
             if ($time eq 'BOT') {
                 $md5 = Digest::MD5->new;
                 $md5->add($name);
@@ -530,7 +539,7 @@ sub getPlayers
             if (!defined $uniqueid && defined $steamid && defined $slot_name && $slot_name eq $slot."/".$name) {
                 $uniqueid = $steamid; # new player cs2
             }
-            my $key = ($::g_mode eq "NameTrack") ? $name : ($::g_mode eq "LAN") ? $address : $uniqueid;
+            my $key = ($::g_mode eq "NameTrack") ? $name : ($::g_mode eq "LAN" && $address) ? "$address/$userid/$name" : $uniqueid;
             next unless $key;
             $players{$key} = {
                 "slot"       => $slot,
@@ -538,12 +547,8 @@ sub getPlayers
                 "UserID"     => $userid,
                 "realuserid" => ($slot ne $userid ? $userid: ''),
                 "UniqueID"   => $uniqueid,
-                "Time"       => $time,
                 "Ping"       => $ping,
-                "Loss"       => $loss,
-                "State"      => $state,
-                "Address"    => $address,
-                "ClientPort" => $port
+                "Address"    => $address
             };
 
         }

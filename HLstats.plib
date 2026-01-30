@@ -9,7 +9,7 @@
 # For current support and updates, visit: https://snipezilla.com or https://github.com/SnipeZilla
 
 # HLstatsZ release version number
-$g_version = "2.4.6";
+$g_version = "2.5";
 
 my %stmt_cache = ();
 %g_eventTables = (
@@ -49,8 +49,6 @@ my %stmt_cache = ();
         ["playerId", "ping"],
     "StatsmeTime",
         ["playerId", "time"],
-    "Latency",
-        ["playerId", "ping"],
     "Chat",
         ["playerId", "message_mode", "message"]
 );

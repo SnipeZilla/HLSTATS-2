@@ -23,7 +23,6 @@ my $opt_configfile = "./hlstats.conf";
 #               (our *.plib, *.pm files).
 my $opt_libdir = "./";
 
-
 ##
 ##
 ################################################################################
@@ -48,10 +47,10 @@ binmode STDOUT, ":utf8";
 ##
 
 # Options
-
 my $opt_help = 0;
 my $opt_version = 0;
 my $opt_numdays = 1;
+my $g_deletedays = 28;
 my $opt_player_activity = 0;
 my $opt_awards = 0;
 my $opt_ribbons = 0;
@@ -68,6 +67,18 @@ our $db_name = "hlstats";
 
 my $date_ubase="";
 my $date_base="CURRENT_DATE()";
+
+my %player_tables = map { $_ => 1 } qw(
+    ChangeName ChangeRole ChangeTeam Chat Connects Disconnects Entries
+    Latency PlayerActions PlayerPlayerActions Statsme Statsme2
+    StatsmeLatency StatsmeTime Suicides TeamBonuses
+);
+my %frag_tables = map { $_ => 1 } qw(
+    Frags Teamkills
+);
+my %global_tables = map { $_ => 1 } qw(
+    Admin Rcon
+);
 
 
 my $usage = <<EOT
@@ -431,50 +442,47 @@ sub DoAwards
         
         if ($code eq "latency") {
             $resultDaily = query_now("
-                SELECT
-                    hlstats_Events_Latency.playerId,
-                    ROUND(ROUND(SUM(ping) /    COUNT(ping), 0) / 2, 0) AS av_latency
-                FROM
-                    hlstats_Events_Latency
-                INNER JOIN
-                    hlstats_Servers ON
-                    hlstats_Servers.serverId=hlstats_Events_Latency.serverId
-                    AND hlstats_Servers.game=?
-                INNER JOIN
-                    hlstats_Players    ON
-                    hlstats_Players.playerId = hlstats_Events_Latency.playerId
-                    AND hlstats_Players.hideranking=0
-                    AND hlstats_Players.lastAddress <> ''
-                WHERE   
-                    hlstats_Events_Latency.eventTime < $date_base
-                    AND hlstats_Events_Latency.eventTime > DATE_SUB($date_base, INTERVAL $opt_numdays DAY)
-                GROUP BY
-                    hlstats_Events_Latency.playerId
-                ORDER BY 
-                    av_latency
-                LIMIT 1        
-            ",$game);     
+                 SELECT
+                     p.playerId,
+                     ROUND(p.lastPing / 2, 0) AS latency
+                 FROM
+                     hlstats_Players p
+                 INNER JOIN
+                     hlstats_Players_History h 
+                         ON h.playerId = p.playerId
+                        AND h.game = p.game
+                 WHERE
+                     p.game = ?
+                     AND p.hideranking = 0
+                     AND p.lastAddress <> ''
+                     AND p.last_event > UNIX_TIMESTAMP(UTC_TIMESTAMP() - INTERVAL $opt_numdays DAY)
+                     AND h.eventTime >= UNIX_TIMESTAMP(DATE_SUB(FROM_UNIXTIME($date_base), INTERVAL $opt_numdays DAY))
+                     AND h.eventTime <  UNIX_TIMESTAMP(DATE_SUB(FROM_UNIXTIME($date_base), INTERVAL ($opt_numdays - 1) DAY))
+                     AND h.connection_time >= 300
+                     AND p.lastPing IS NOT NULL
+                     AND p.lastPing > 0
+                 ORDER BY
+                     p.lastPing ASC
+                 LIMIT 1;
+            ", $game);
             $resultGlobal = query_now("
                 SELECT
-                    hlstats_Events_Latency.playerId,
-                    ROUND(ROUND(SUM(ping) /    COUNT(ping), 0) / 2, 0) AS av_latency
+                    p.playerId,
+                    ROUND(p.lastPing / 2, 0) AS latency
                 FROM
-                    hlstats_Events_Latency
-                INNER JOIN
-                    hlstats_Servers ON
-                    hlstats_Servers.serverId=hlstats_Events_Latency.serverId
-                    AND hlstats_Servers.game=?
-                INNER JOIN
-                    hlstats_Players    ON
-                    hlstats_Players.playerId = hlstats_Events_Latency.playerId
-                    AND hlstats_Players.hideranking=0
-                    AND hlstats_Players.lastAddress <> ''
-                GROUP BY
-                    hlstats_Events_Latency.playerId
-                ORDER BY 
-                    av_latency
-                LIMIT 1        
-            ",$game);     
+                    hlstats_Players p
+                WHERE
+                    p.game = ?
+                    AND p.hideranking = 0
+                    AND p.lastAddress <> ''
+                    AND p.connection_time >= 300
+                    AND p.last_event > UNIX_TIMESTAMP(UTC_TIMESTAMP() - INTERVAL $g_deletedays DAY)
+                    AND p.lastPing IS NOT NULL
+                    AND p.lastPing > 0
+                ORDER BY
+                    p.lastPing ASC
+                LIMIT 1;
+            ", $game);
         } elsif ($code eq "mostkills") {
             $resultDaily = query_now("
                 SELECT
@@ -485,7 +493,7 @@ sub DoAwards
                     hlstats_Players
                 WHERE
                     hlstats_Players_History.game=?
-                    AND    hlstats_Players.playerId = hlstats_Players_History.playerId
+                    AND hlstats_Players.playerId = hlstats_Players_History.playerId
                     AND hlstats_Players.hideranking=0
                     AND hlstats_Players.lastAddress <> ''
                     AND eventTime = DATE_SUB($date_base, INTERVAL $opt_numdays DAY)
@@ -1238,45 +1246,108 @@ sub DoClans
 
 sub DoPruning
 {
-    $result = query_now("SELECT `value` FROM hlstats_Options WHERE keyname='DeleteDays'");
-    my ($g_deletedays) = $result->fetchrow_array;
-    
-    print "++ Cleaning up database: deleting events older than $g_deletedays days... ";
-    
-    foreach $eventTable (keys(%g_eventTables))
+    my $result = query_now("SELECT `value` FROM hlstats_Options WHERE keyname='DeleteDays'");
+    ($g_deletedays) = $result->fetchrow_array;
+
+    print "++ Cleaning up database using per-player sliding window ($g_deletedays days)\n";
+
+    foreach my $eventTable (keys %g_eventTables)
     {
-        exec_now("
-            DELETE FROM
-                    hlstats_Events_$eventTable
-            WHERE
-                    eventTime < DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL $g_deletedays DAY)
+        print "   - Pruning hlstats_Events_$eventTable ... ";
+
+        # -----------------------------
+        # Per-player tables
+        # -----------------------------
+        if ($player_tables{$eventTable}) {
+            exec_now("
+                DELETE e
+                FROM hlstats_Events_$eventTable e
+                JOIN (
+                    SELECT playerId, MAX(eventTime) AS last_event
+                    FROM hlstats_Events_$eventTable
+                    GROUP BY playerId
+                ) t ON e.playerId = t.playerId
+                WHERE e.eventTime < (t.last_event - INTERVAL $g_deletedays DAY)
             ");
+            print "done\n";
+            next;
+        }
+
+        # -----------------------------
+        # Frag-like tables (killer/victim)
+        # -----------------------------
+        if ($frag_tables{$eventTable}) {
+            exec_now("
+                DELETE e
+                FROM hlstats_Events_$eventTable e
+                JOIN (
+                    SELECT killerId AS pid, MAX(eventTime) AS last_event
+                    FROM hlstats_Events_$eventTable
+                    GROUP BY killerId
+                    UNION
+                    SELECT victimId AS pid, MAX(eventTime)
+                    FROM hlstats_Events_$eventTable
+                    GROUP BY victimId
+                ) t ON (e.killerId = t.pid OR e.victimId = t.pid)
+                WHERE e.eventTime < (t.last_event - INTERVAL $g_deletedays DAY)
+            ");
+            print "done\n";
+            next;
+        }
+
+        # -----------------------------
+        # Global prune fallback
+        # -----------------------------
+        if ($global_tables{$eventTable}) {
+            exec_now("
+                DELETE FROM hlstats_Events_$eventTable
+                WHERE eventTime < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 YEAR)
+            ");
+            print "done\n";
+            next;
+        }
+
+        # -----------------------------
+        # Unknown/new table
+        # -----------------------------
+        exec_now("
+            DELETE FROM hlstats_Events_$eventTable
+            WHERE eventTime < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 YEAR)
+        ");
+        print "done (fallback)\n";
     }
-    
-    print "done\n++ Cleaning up database: deleting player history older than $g_deletedays days... ";
+
+    # -----------------------------------------
+    # Player history
+    # -----------------------------------------
+    print "++ Cleaning up player history using per-player sliding window ($g_deletedays days)... ";
     exec_now("
-        DELETE FROM
-            hlstats_Players_History
-        WHERE
-            eventTime < DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL $g_deletedays DAY)
+        DELETE e
+        FROM hlstats_Players_History e
+        JOIN (
+            SELECT playerId, MAX(eventTime) AS last_event
+            FROM hlstats_Players_History
+            GROUP BY playerId
+        ) t ON e.playerId = t.playerId
+        WHERE e.eventTime < (t.last_event - INTERVAL $g_deletedays DAY)
     ");
-    
-    print "done\n++ Cleaning up database: deleting stale trend samples... ";
+    print "done\n";
+
+    # -----------------------------------------
+    # Other HLstats tables (unchanged)
+    # -----------------------------------------
+    print "++ Cleaning up stale trend samples... ";
     exec_now("
-        DELETE FROM
-            hlstats_Trend
-        WHERE
-            timestamp < (UNIX_TIMESTAMP() - 172800)
+        DELETE FROM hlstats_Trend
+        WHERE timestamp < (UNIX_TIMESTAMP() - 172800)
     ");
-    
-    print "done\n++ Cleaning up database: deleting server load history older than one year... ";
+    print "done\n";
+
+    print "++ Cleaning up server load history older than one year... ";
     exec_now("
-        DELETE FROM
-            hlstats_server_load
-        WHERE
-            timestamp < (UNIX_TIMESTAMP(CURRENT_TIMESTAMP() - INTERVAL 1 YEAR))
+        DELETE FROM hlstats_server_load
+        WHERE timestamp < (UNIX_TIMESTAMP(UTC_TIMESTAMP() - INTERVAL 1 YEAR))
     ");
-    
     print "done\n";
 }
 
