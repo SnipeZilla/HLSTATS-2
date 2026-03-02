@@ -173,6 +173,17 @@ sub sendrecv
   
 }
 
+sub destroy {
+    my ($self) = @_;
+    if ($self->{rcon_socket}) {
+        eval { shutdown($self->{rcon_socket}, 2); };
+        eval { $self->{rcon_socket}->close(); };
+        $self->{rcon_socket} = undef;
+    }
+    $self->{auth} = 0;
+    return 1;
+}
+
 #
 # Send a package
 #

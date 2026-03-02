@@ -3059,7 +3059,7 @@ sub handleData
             # Clean up
             my %status_players = $g_servers{$server}->rcon_getplayers();
             my %players_temp   = %{ $g_servers{$server}->{"srv_players"} };
-            if ( defined $status_players{"host"}->{"name"} ) {
+            if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} > 2 ) {
                 # remove idling players
                 while (my ($pl, $player) = each %players_temp) {
                     my $userid    = $player->{userid};
@@ -3077,6 +3077,13 @@ sub handleData
                         }
                         $player->flushDB();
                     }
+                }
+                # Server is offline
+                if ($g_servers{$server}->{rcon_obj}->{rcon_err} > 2) {
+                    my $socket = $g_servers{$server}->{rcon_obj};
+                    $socket->destroy() if $socket;
+                    delete $g_servers{$server};
+                    return 0;
                 }
                 # update map/hostname
                 $g_servers{$server}->get_map($status_players{"host"}) if $status_players{"host"}->{"map"};

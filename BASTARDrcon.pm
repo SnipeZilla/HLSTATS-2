@@ -40,7 +40,8 @@ sub new
     $self->{ipAddr}        = inet_aton($server_object->{address});
     $self->{server_port}   = int($server_object->{port}) or die("BASTARDrcon: invalid Port \"" . $server_object->{port} . "\"\n");
 
-    $self->{socket} = undef;
+    $self->{socket}        = undef;
+    $self->{rcon_err}      = 0;
 
     return $self;
 }
@@ -67,35 +68,44 @@ sub _sendrecv
     }
 
     my $sock   = $self->{rcon_socket};
-    my $ipaddr = $self->{ipAddr};
-    my $port   = $self->{server_port};
-    my $pass   = $self->{rcon_password};
-    
-    my $hisp   = sockaddr_in($port, $ipaddr);
+    my $hisp   = sockaddr_in($self->{server_port}, $self->{ipAddr});
 
     my $challenge = $self->_get_rcon_challenge();
-    return $self->_healthcheck_socket() unless defined $challenge;
+    if (!defined $challenge) {
+        $self->{rcon_err}++;
+        $self->_healthcheck_socket();
+        return "";
+    }
 
-    my $payload = "rcon $challenge \"$pass\" $cmd\n";
+    my $payload = qq{rcon $challenge "$self->{rcon_password}" $cmd\n};
     my $msg     = "\xFF\xFF\xFF\xFF" . $payload;
 
     my $sent = send($sock, $msg, 0, $hisp);
-    return $self->_healthcheck_socket() unless defined $sent;
+    if (!defined $sent) {
+        $self->{rcon_err}++;
+        $self->_healthcheck_socket();
+        return "";
+    }
 
     my $ans = $self->_read_multi_packets($TIMEOUT);
-    return $self->_healthcheck_socket() unless defined $ans;
 
+    if (!defined $ans || $ans eq "") {
+        $self->{rcon_err}++;
+        if ($self->{rcon_err} >= 3) {
+            $self->_healthcheck_socket();  # now check/reopen socket
+        }
+        return "";
+    }
 
-    # Empty reply → stale challenge → retry once
     if ($ans =~ /No challenge/i && $attempt == 0) {
-        ::printEvent("RCON", "Challenge expired for $self->{address}:$self->{server_port}",1);
+        ::printEvent("RCON", "Challenge expired for $self->{address}:$self->{server_port}", 1);
         delete $self->{_rcon_challenge};
         return $self->_sendrecv($cmd, 1);
     }
 
+    $self->{rcon_err} = 0;
     return $ans;
 }
-
 #
 #  Socket management with healthcheck
 #
@@ -158,8 +168,7 @@ sub _get_rcon_challenge
     return $challenge;
 }
 
-sub _read_multi_packets
-{
+sub _read_multi_packets {
     my ($self, $timeout_first) = @_;
 
     my $sock = $self->{rcon_socket} or return "";
@@ -169,86 +178,116 @@ sub _read_multi_packets
 
     my $timeout = $timeout_first;
     my $ans     = "";
-    my $buf;
 
     while (1) {
         my $ready = select(my $rout = $rin, undef, undef, $timeout);
         last unless $ready;
 
-        $buf = "";
-        recv($sock, $buf, 8192, 0);
+        my $buf = "";
+        my $from = recv($sock, $buf, 8192, 0);
+        last unless defined $from;           # recv error
+
+        next if $buf eq "";                  # empty
+
+        $buf =~ s/\x00+$//g;                 # trailing craps/nulls
+        $buf =~ s/^\xFF\xFF\xFF\xFFl//;      # HL response
+        $buf =~ s/^\xFF\xFF\xFF\xFFn//;      # QW response
+        $buf =~ s/^\xFF\xFF\xFF\xFF//;       # Q2/Q3 response
+        $buf =~ s/^\xFE\xFF\xFF\xFF.....//;  # old HL feature
+
         $ans .= $buf;
 
-        $timeout = 0.20; # Next packet
+        $timeout = 0.20; # next packet
     }
 
-    return undef unless $ans;
-
-    # Strip HL headers
-    $ans =~ s/\x00+$//g;                 # trailing crap
-    $ans =~ s/^\xFF\xFF\xFF\xFFl//g;     # HL response
-    $ans =~ s/^\xFF\xFF\xFF\xFFn//g;     # QW response
-    $ans =~ s/^\xFF\xFF\xFF\xFF//g;      # Q2/Q3 response
-    $ans =~ s/^\xFE\xFF\xFF\xFF.....//g; # old HL bug/feature
-
+    return undef if $ans eq "";
     return $ans;
 }
 
-sub _healthcheck_socket
-{
-    my ($self) = @_;
-
-    my $sock         = $self->{rcon_socket};
-    my ($local_port) = sockaddr_in(getsockname($sock));
-    my $loop_addr    = sockaddr_in($local_port, inet_aton("127.0.0.1"));
-
-    my $echo = "hlstatsz-echo";
-    my $sent = send($sock, $echo, 0, $loop_addr);
-
-    if (!defined $sent) {
-        ::printEvent("RCON", " UDP socket can't send: stalled or crashed",1);
-        return $self->_open_socket();
-    }
-
-    my $rin = "";
+sub _drain_udp {
+    my ($sock) = @_;
+    my $rin = '';
     vec($rin, fileno($sock), 1) = 1;
 
-    # loopback address
-    my $ready = select(my $rout = $rin, undef, undef, 0.05);
-    if ($ready) {
-        my $buf = "";
-        recv($sock, $buf, 8192, 0);
-        if ($buf eq $echo) {
-            return 1;   # loopback OK
-        }
-        ::printEvent("RCON", " UDP socket sent to self failed: stalled or crashed",1);
+    while (select(my $rout = $rin, undef, undef, 0) > 0) {
+        my $tmp = '';
+        recv($sock, $tmp, 8192, 0);
     }
+}
 
-    # HLDS simple ping
-    my $ipaddr = $self->{ipAddr};
-    my $port   = $self->{server_port};
-    my $hisp   = sockaddr_in($port, $ipaddr);
+sub _healthcheck_socket {
+    my ($self) = @_;
+    my $sock = $self->{rcon_socket};
 
-    my $ping = "\xFF\xFF\xFF\xFFping\n";
-    $sent = send($sock, $ping, 0, $hisp);
+    _drain_udp($sock);
+
+    my ($local_port) = sockaddr_in(getsockname($sock));
+    my $loop_addr    = sockaddr_in($local_port, inet_aton("127.0.0.1"));
+    my $echo         = "hlstatsz-echo";
+
+    my $sent = send($sock, $echo, 0, $loop_addr);
     if (!defined $sent) {
-        ::printEvent("RCON", " UDP socket can't read: stalled or crashed",1);
+        ::printEvent("RCON", "UDP socket can't send (loopback): $!", 1);
         return $self->_open_socket();
     }
 
-    $rin = "";
+    my $rin = '';
+    vec($rin, fileno($sock), 1) = 1;
+
+    my $ready = select(my $rout = $rin, undef, undef, 0.05);
+    if (!$ready) {
+        $self->{sock_err}++;
+        ::printEvent("RCON", "UDP loopback timeout (socket may be wedged)", 1);
+        return $self->_open_socket();
+    }
+
+    my $buf = '';
+    recv($sock, $buf, 8192, 0);
+    if ($buf ne $echo) {
+        _drain_udp($sock);
+    }
+
+    $self->{sock_err} = 0;
+
+    my $hisp = sockaddr_in($self->{server_port}, $self->{ipAddr});
+    my $ping = "\xFF\xFF\xFF\xFFTSource Engine Query\x00";
+
+    $sent = send($sock, $ping, 0, $hisp);
+    if (!defined $sent) {
+        ::printEvent("RCON", "UDP can't send to server: $!", 1);
+        return 0; # server offline
+    }
+
+    $rin = '';
     vec($rin, fileno($sock), 1) = 1;
 
     $ready = select(my $rout2 = $rin, undef, undef, 0.25);
     if ($ready) {
-        my $buf = "";
-        recv($sock, $buf, 8192, 0);
-        return 1 if $buf ne "";
+        my $reply = '';
+        recv($sock, $reply, 8192, 0);
+        if ($reply ne '') {
+            $self->{rcon_err} = 0;
+            return 1; # server online
+        }
     }
 
-    # No reply → socket or path is stale
-    ::printEvent("RCON", " UDP socket can't read: crashed",1);
-    return $self->_open_socket();
+    # server offline/unreachable
+    $self->{rcon_err}++;
+    if ($self->{rcon_err} == 3) {
+        ::printEvent("RCON", "Server Offline/Unreachable", 1);
+    }
+    return 0;
+}
+
+sub destroy {
+    my ($self) = @_;
+    if ($self->{rcon_socket} && defined fileno($self->{rcon_socket})) {
+        eval { close($self->{rcon_socket}); };
+    }
+    delete $self->{rcon_socket};
+    delete $self->{_rcon_challenge};
+    $self->{rcon_err} = 0;
+    return 1;
 }
 
 #
