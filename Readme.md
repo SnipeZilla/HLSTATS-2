@@ -16,6 +16,9 @@
 
 ## 🤔❓ FAQ
 
+- Where do I install HLstats?
+HLstats is required to operate on your SQL database server; it should not be run on your Game Server!
+
 - Why don’t my daily rewards run?<br>
 Now with fully optional built‑in daily cronjob (Awards & Bans); solving one of the most common complaints
 
