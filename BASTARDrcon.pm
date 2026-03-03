@@ -90,15 +90,16 @@ sub _sendrecv
     my $ans = $self->_read_multi_packets($TIMEOUT);
 
     if (!defined $ans || $ans eq "") {
-        $self->{rcon_err}++;
-        if ($self->{rcon_err} >= 3) {
-            $self->_healthcheck_socket();  # now check/reopen socket
+        if ($cmd =~ /^\S+$/) {
+            ::printEvent("RCON", "$cmd :: Failed to read packet", 1, "$self->{address}:$self->{server_port}");
+            $self->{rcon_err}++;
+            $self->_healthcheck_socket();
         }
         return "";
     }
 
     if ($ans =~ /No challenge/i && $attempt == 0) {
-        ::printEvent("RCON", "Challenge expired for $self->{address}:$self->{server_port}", 1);
+        ::printEvent("RCON", "Challenge expired", 1, "$self->{address}:$self->{server_port}");
         delete $self->{_rcon_challenge};
         return $self->_sendrecv($cmd, 1);
     }
@@ -116,7 +117,7 @@ sub _open_socket
     if (defined $self->{rcon_socket}) {
         close($self->{rcon_socket});
         delete $self->{rcon_socket};
-        ::printEvent("RCON", "Closing UDP socket on $self->{address}:$self->{server_port}: $!",1);
+        ::printEvent("RCON", "Closing UDP socket: $!",1, "$self->{address}:$self->{server_port}");
     }
 
     delete $self->{_rcon_challenge};
@@ -124,15 +125,15 @@ sub _open_socket
     my $proto = $self->{_proto};
     socket($self->{rcon_socket}, PF_INET, SOCK_DGRAM, $proto);
     unless ($self->{"rcon_socket"}) {
-        ::printEvent("RCON", "Cannot setup UDP socket on $self->{address}:$self->{server_port}: $!",1);
+        ::printEvent("RCON", "Cannot setup UDP socket: $!",1,"$self->{address}:$self->{server_port}");
         return 0;
     } else {
-        ::printEvent("RCON", " UDP socket is now open on $self->{address}:$self->{server_port}",1);
+        ::printEvent("RCON", " UDP socket is now open",1,"$self->{address}:$self->{server_port}");
     }
 
     my $bindaddr = sockaddr_in(0, INADDR_ANY);
     if (!bind($self->{rcon_socket}, $bindaddr)) {
-        ::printEvent("RCON", " Error BASTARDrcon: rebuild bind: $!", 1);
+        ::printEvent("RCON", " Error BASTARDrcon: rebuild bind: $!", 1,"$self->{address}:$self->{server_port}");
         return 0;
     }
 }
@@ -227,7 +228,7 @@ sub _healthcheck_socket {
 
     my $sent = send($sock, $echo, 0, $loop_addr);
     if (!defined $sent) {
-        ::printEvent("RCON", "UDP socket can't send (loopback): $!", 1);
+        ::printEvent("RCON", "UDP socket can't send (loopback): $!", 1, "$self->{address}:$self->{server_port}");
         return $self->_open_socket();
     }
 
@@ -237,7 +238,7 @@ sub _healthcheck_socket {
     my $ready = select(my $rout = $rin, undef, undef, 0.05);
     if (!$ready) {
         $self->{sock_err}++;
-        ::printEvent("RCON", "UDP loopback timeout (socket may be wedged)", 1);
+        ::printEvent("RCON", "UDP loopback timeout (socket may be wedged)", 1, "$self->{address}:$self->{server_port}");
         return $self->_open_socket();
     }
 
@@ -254,7 +255,7 @@ sub _healthcheck_socket {
 
     $sent = send($sock, $ping, 0, $hisp);
     if (!defined $sent) {
-        ::printEvent("RCON", "UDP can't send to server: $!", 1);
+        ::printEvent("RCON", "UDP can't send to server: $!", 1, ,"$self->{address}:$self->{server_port}");
         return 0; # server offline
     }
 
@@ -274,7 +275,7 @@ sub _healthcheck_socket {
     # server offline/unreachable
     $self->{rcon_err}++;
     if ($self->{rcon_err} == 3) {
-        ::printEvent("RCON", "Server Offline/Unreachable", 1);
+        ::printEvent("RCON", "Server Offline/Unreachable", 1, ,"$self->{address}:$self->{server_port}");
     }
     return 0;
 }

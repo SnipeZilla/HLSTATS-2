@@ -99,10 +99,10 @@ sub sendrecv
           shutdown($self->{"rcon_socket"}, 2);
           $self->{"rcon_socket"}->close();
           $self->{"rcon_socket"} = undef;
-          ::printEvent("RCON", "Closing TCP socket on $server_object->{address}:$server_object->{port}: $!",1);
+          ::printEvent("RCON", "Closing TCP socket: $!",1, "$server_object->{address}:$server_object->{port}");
       }
 
-      ::printEvent("RCON", "Attempting TCP socket on $server_object->{address}:$server_object->{port}: $!",1);
+      ::printEvent("RCON", "Attempting TCP socket: $!",1, "$server_object->{address}:$server_object->{port}");
 
       $self->{"rcon_socket"} = IO::Socket::INET->new(
           Proto    => "tcp",
@@ -112,9 +112,9 @@ sub sendrecv
       );
 
       unless ($self->{"rcon_socket"}) {
-          ::printEvent("RCON", "Cannot setup TCP socket on $server_object->{address}:$server_object->{port}: $!",1);
+          ::printEvent("RCON", "Cannot setup TCP socket: $!",1, "$server_object->{address}:$server_object->{port}");
       } else {
-          ::printEvent("RCON", " TCP socket is now open on $server_object->{address}:$server_object->{port}",1);
+          ::printEvent("RCON", " TCP socket is now open",1, "$server_object->{address}:$server_object->{port}");
           binmode($self->{"rcon_socket"}, ':raw');
           $self->{"rcon_socket"}->autoflush(1);
       }
@@ -132,7 +132,7 @@ sub sendrecv
     if ($auth == 0)  {
       ::printEvent("RCON", "Trying to get rcon access (auth)",1);
       if ($self->send_rcon($AUTH_PACKET_ID, $SERVERDATA_AUTH, $server->{rcon}, 1)) {
-        ::printEvent("RCON", "Couldn't send password", 1);
+        ::printEvent("RCON", "Couldn't send password", 1, "$server_object->{address}:$server_object->{port}");
         return;
       }
       my ($id, $command, $response) = $self->recieve_rcon($AUTH_PACKET_ID);
@@ -141,7 +141,7 @@ sub sendrecv
       } elsif (($command == $SERVERDATA_RESPONSE_VALUE) && ($id == $AUTH_PACKET_ID)) {  
          #Source servers sends one junk packet during the authentication step, before it responds 
          # with the correct authentication response.  
-         ::printEvent("RCON", "Junk packet from Source Engine",3);
+         ::printEvent("RCON", "Junk packet from Source Engine",3, "$server_object->{address}:$server_object->{port}");
          my ($id, $command, $response) = $self->recieve_rcon($AUTH_PACKET_ID);
          $auth = $self->get_auth_code($id);
       }

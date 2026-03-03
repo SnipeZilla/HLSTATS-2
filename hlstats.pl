@@ -3059,7 +3059,7 @@ sub handleData
             # Clean up
             my %status_players = $g_servers{$server}->rcon_getplayers();
             my %players_temp   = %{ $g_servers{$server}->{"srv_players"} };
-            if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} > 2 ) {
+            if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} >= 3 ) {
                 # remove idling players
                 while (my ($pl, $player) = each %players_temp) {
                     my $userid    = $player->{userid};
@@ -3079,7 +3079,8 @@ sub handleData
                     }
                 }
                 # Server is offline
-                if ($g_servers{$server}->{rcon_obj}->{rcon_err} > 2) {
+                if ($g_servers{$server}->{rcon_obj}->{rcon_err} >= 3) {
+                    ::printEvent("GAME", "Now destroying socket and deleting game object for $g_servers{$server}->{game}",1, $server);
                     my $socket = $g_servers{$server}->{rcon_obj};
                     $socket->destroy() if $socket;
                     delete $g_servers{$server};

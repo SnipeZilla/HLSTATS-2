@@ -420,8 +420,8 @@ sub _dbg_flush {
 
 sub printEvent
 {
-    my ($code, $description, $level) = @_;
-
+    my ($code, $description, $level, $addr) = @_;
+    $addr //= $s_addr;
     return unless (
         ($g_stdin == 0 && $g_debug > 0 &&
             ($g_debug == 9 || $level == 1 || $g_debug == $level))
@@ -433,7 +433,7 @@ sub printEvent
         $line = "$code - $description\n";
     } else {
         my $timestamp = _ts_cached();
-        $line = sprintf("%s %21s - %s: %s\n", $timestamp, $s_addr, $code, $description);
+        $line = sprintf("%s %21s - %s: %s\n", $timestamp, $addr, $code, $description);
     }
 
     push @DBGQ, $line;
