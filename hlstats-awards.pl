@@ -459,6 +459,7 @@ sub DoAwards
                      AND h.eventTime >= UNIX_TIMESTAMP(DATE_SUB(FROM_UNIXTIME($date_base), INTERVAL $opt_numdays DAY))
                      AND h.eventTime <  UNIX_TIMESTAMP(DATE_SUB(FROM_UNIXTIME($date_base), INTERVAL ($opt_numdays - 1) DAY))
                      AND h.connection_time >= 300
+                     AND h.kills > 0
                      AND p.lastPing IS NOT NULL
                      AND p.lastPing > 0
                  ORDER BY
@@ -475,7 +476,7 @@ sub DoAwards
                     p.game = ?
                     AND p.hideranking = 0
                     AND p.lastAddress <> ''
-                    AND p.connection_time >= 300
+                    AND p.kills > 1000
                     AND p.last_event > UNIX_TIMESTAMP(UTC_TIMESTAMP() - INTERVAL $g_deletedays DAY)
                     AND p.lastPing IS NOT NULL
                     AND p.lastPing > 0
