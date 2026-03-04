@@ -102,7 +102,7 @@ sub sendrecv
           ::printEvent("RCON", "Closing TCP socket: $!",1, "$server_object->{address}:$server_object->{port}");
       }
 
-      ::printEvent("RCON", "Attempting TCP socket: $!",1, "$server_object->{address}:$server_object->{port}");
+      ::printEvent("RCON", "Attempting TCP socket",1, "$server_object->{address}:$server_object->{port}");
 
       $self->{"rcon_socket"} = IO::Socket::INET->new(
           Proto    => "tcp",
@@ -221,7 +221,7 @@ sub send_rcon
     my $n = syswrite($sock, $data);
     if ($!) {
         $self->{rcon_err}++;
-        ::printEvent("RCON", "$!",1);
+        ::printEvent("RCON", "$!",1,"$self->{server_object}->{address}:$self->{server_object}->{port}");
     }
 
     return ($n // 0) == length($data) ? 0 : 1;

@@ -3057,37 +3057,38 @@ sub handleData
             } else { $g_servers{$server}->{track_server_timestamp} = $ev_daemontime };
 
             # Clean up
-            my %status_players = $g_servers{$server}->rcon_getplayers();
             my %players_temp   = %{ $g_servers{$server}->{"srv_players"} };
-            if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} >= 3 ) {
-                # remove idling players
-                while (my ($pl, $player) = each %players_temp) {
-                    my $userid    = $player->{userid};
-                    my $uniqueid  = $player->{uniqueid};
-                    my $key       = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
-                    my $delayed   = (!$player->{is_bot} && (!$player->{"ping"} || !$player->{address})) ? 1:0;
-                    if (!defined($status_players{$key})) {
-                        printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
-                        removePlayer($server, $userid, $uniqueid);
-                    }  elsif ($delayed) {
-                        $player->{ping} = $status_players{$key}->{Ping};
-                        if ( !$player->{address} ) {
-                            $player->{address} = $status_players{$key}->{Address};
-                            $player->geoLookup();
+            if (%players_temp) {
+                my %status_players = $g_servers{$server}->rcon_getplayers();
+                if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} >= 3 ) {
+                    # remove idling players
+                    while (my ($pl, $player) = each %players_temp) {
+                        my $userid    = $player->{userid};
+                        my $uniqueid  = $player->{uniqueid};
+                        my $key       = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
+                        my $delayed   = (!$player->{is_bot} && (!$player->{"ping"} || !$player->{address})) ? 1:0;
+                        if (!defined($status_players{$key})) {
+                            printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
+                            removePlayer($server, $userid, $uniqueid);
+                        }  elsif ($delayed) {
+                            $player->{ping} = $status_players{$key}->{Ping};
+                            if ( !$player->{address} ) {
+                                $player->{address} = $status_players{$key}->{Address};
+                                $player->geoLookup();
+                            }
+                            $player->flushDB();
                         }
-                        $player->flushDB();
                     }
+                    # update map/hostname
+                    $g_servers{$server}->get_map($status_players{"host"}) if $status_players{"host"}->{"map"};
                 }
-                # Server is offline
-                if ($g_servers{$server}->{rcon_obj}->{rcon_err} >= 3) {
-                    ::printEvent("GAME", "Now destroying socket and deleting game object for $g_servers{$server}->{game}",1, $server);
-                    my $socket = $g_servers{$server}->{rcon_obj};
-                    $socket->destroy() if $socket;
-                    delete $g_servers{$server};
-                    return 0;
-                }
-                # update map/hostname
-                $g_servers{$server}->get_map($status_players{"host"}) if $status_players{"host"}->{"map"};
+            # Server is offline
+            } elsif ($g_servers{$server}->{rcon_obj}->{rcon_err} >= 3 && $g_servers{$server}->{last_event}+599 < $ev_daemontime) {
+                ::printEvent("GAME", "Offline: Now destroying socket and deleting game object for $g_servers{$server}->{game}",1, $server);
+                my $socket = $g_servers{$server}->{rcon_obj};
+                $socket->destroy() if $socket;
+                delete $g_servers{$server};
+                return 0;
             }
             $g_servers{$server}->{next_timeout}=$ev_daemontime+30+rand(30);
         }

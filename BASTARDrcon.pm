@@ -86,15 +86,14 @@ sub _sendrecv
         $self->_healthcheck_socket();
         return "";
     }
+    return "" if ($cmd !~ /^\S+$/);
 
     my $ans = $self->_read_multi_packets($TIMEOUT);
 
-    if (!defined $ans || $ans eq "") {
-        if ($cmd =~ /^\S+$/) {
-            ::printEvent("RCON", "$cmd :: Failed to read packet", 1, "$self->{address}:$self->{server_port}");
-            $self->{rcon_err}++;
-            $self->_healthcheck_socket();
-        }
+    if (!defined $ans) {
+        ::printEvent("RCON", "$cmd :: Failed to read packet", 1, "$self->{address}:$self->{server_port}");
+        $self->{rcon_err}++;
+        $self->_healthcheck_socket();
         return "";
     }
 
@@ -187,8 +186,6 @@ sub _read_multi_packets {
         my $buf = "";
         my $from = recv($sock, $buf, 8192, 0);
         last unless defined $from;           # recv error
-
-        next if $buf eq "";                  # empty
 
         $buf =~ s/\x00+$//g;                 # trailing craps/nulls
         $buf =~ s/^\xFF\xFF\xFF\xFFl//;      # HL response
