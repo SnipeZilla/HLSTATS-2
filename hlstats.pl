@@ -1311,7 +1311,7 @@ sub like
 sub botidcheck
 { 
     my ($uniqueid) = @_;
-    if ($uniqueid =~ /^BOT:[A-Za-z0-9]+$|^BOT$/ || ($uniqueid eq "0" && $g_servers{$s_addr}->{play_game} !=  CS2()) || $uniqueid =~ /^00000000\:\d+\:0$/) {
+    if ($uniqueid =~ /^BOT/ || ($uniqueid eq "0" && $g_servers{$s_addr}->{play_game} !=  CS2()) || $uniqueid =~ /^00000000\:\d+\:0$/ || $uniqueid =~ /^0:0$/) {
         return 1;
     }
     return 0;
@@ -3066,17 +3066,16 @@ sub handleData
                         my $userid    = $player->{userid};
                         my $uniqueid  = $player->{uniqueid};
                         my $key       = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
-                        my $delayed   = (!$player->{is_bot} && (!$player->{"ping"} || !$player->{address})) ? 1:0;
                         if (!defined($status_players{$key})) {
                             printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3);
                             removePlayer($server, $userid, $uniqueid);
-                        }  elsif ($delayed) {
-                            $player->{ping} = $status_players{$key}->{Ping};
-                            if ( !$player->{address} ) {
+                        } elsif ( !$player->{is_bot} ) {
+                            $player->{ping} = $status_players{$key}->{Ping} if ($status_players{$key}->{Ping} > 0);
+                            if ( $status_players{$key}->{Address} && $player->{address} ne $status_players{$key}->{Address} ) {
                                 $player->{address} = $status_players{$key}->{Address};
                                 $player->geoLookup();
+                                $player->flushDB();
                             }
-                            $player->flushDB();
                         }
                     }
                     # update map/hostname

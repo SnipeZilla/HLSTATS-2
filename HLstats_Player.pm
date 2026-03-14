@@ -37,6 +37,7 @@ sub new
     $self->{uniqueid}            = "";
     $self->{plain_uniqueid}      = "";
     $self->{address}             = "";
+    $self->{lastAddress}         = "";
     $self->{cli_port}            = "";
     $self->{ping}                = 0;
     $self->{connect_time}        = time();
@@ -263,9 +264,9 @@ sub setUniqueId
 
         # An existing player. Get their skill rating.
         $self->{playerid} = $pid;
-        my $rows = ::query_now(q{SELECT skill, kills, displayEvents, flag FROM hlstats_Players WHERE playerId=?}, $pid);
+        my $rows = ::query_now(q{SELECT skill, kills, displayEvents, flag, lastAddress FROM hlstats_Players WHERE playerId=?}, $pid);
         if ($rows->rows > 0) {
-            ($self->{skill}, $self->{total_kills}, $self->{display_events},$self->{flag}) = $rows->fetchrow_array;
+            ($self->{skill}, $self->{total_kills}, $self->{display_events},$self->{flag},$self->{lastAddress}) = $rows->fetchrow_array;
         } else {
             # Have record in hlstats_PlayerUniqueIds but not in hlstats_Players
             $self->insertPlayer($pid);
@@ -468,7 +469,7 @@ sub flushDB {
     my $map_shots     = $self->{map_shots};
     my $map_hits      = $self->{map_hits};
     my $steamid       = $self->{plain_uniqueid};
-    my $address       = $self->{address};
+    my $address       = $self->{address} ? $self->{address} : ($is_bot? '' : '127.0.0.1');
     my $ping          = $self->{ping};
 
     my $is_dead       = $self->{is_dead};
@@ -714,7 +715,10 @@ sub getAddress
             $self->{ping}     = $result->{Ping};
 
             ::printEvent("RCON", "Got Address $self->{address} for $slot_name",3);
-        } else { $haveAddress = 0; }
+        } else { 
+            $haveAddress = 0;
+            $self->{address} = $self->{lastAddress} if $self->{lastAddress};
+       }
     }
 
     if ($haveAddress == 1) {

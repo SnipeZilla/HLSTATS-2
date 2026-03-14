@@ -539,7 +539,7 @@ sub getPlayers
         {
   
             my ($userid, $time, $ping, $address, $name) = ($1, $2, $3, $4 // "", $6);
-            if ($time eq 'BOT') {
+            if ($time =~ /^BOT/) {
                 $md5 = Digest::MD5->new;
                 $md5->add($name);
                 $md5->add($server);
