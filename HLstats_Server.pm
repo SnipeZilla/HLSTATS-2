@@ -387,6 +387,7 @@ sub dorcon
 {
     my ($self, $command)      = @_;
     my $result;
+    my $wants_answer = defined wantarray;
     my $rcon_obj = $self->{rcon_obj};
     if (($rcon_obj) && ($::g_rcon == 1) && ($self->{rcon} ne "")) {
 
@@ -394,6 +395,10 @@ sub dorcon
         $command  =~ s/;//g ;
 
         ::printEvent("RCON", $command, 3,"$self->{address}:$self->{port}");
+        if (!$wants_answer && $rcon_obj->can('execute_nowait')) {
+            $rcon_obj->execute_nowait($command);
+            return;
+        }
         $result = $rcon_obj->execute($command);
 
     } else {
@@ -406,6 +411,7 @@ sub dorcon_multi
 {
     my ($self, @commands)      = @_;
     my $result;
+    my $wants_answer = defined wantarray;
     my $rcon_obj = $self->{rcon_obj};
 
     if (($rcon_obj) && ($::g_rcon == 1) && ($self->{rcon} ne "")) {
@@ -420,6 +426,10 @@ sub dorcon_multi
                 $fullcmd .="$cmd;";
             }
             ::printEvent("RCON", $fullcmd, 3,"$self->{address}:$self->{port}");
+            if (!$wants_answer && $rcon_obj->can('execute_nowait')) {
+                $rcon_obj->execute_nowait($fullcmd);
+                return;
+            }
             $result = $rcon_obj->execute($fullcmd);
         }
         else
@@ -564,7 +574,10 @@ sub get_map
     my ($self, $host) = @_;
 
     if (!$::g_stdin) {
-        if ( ( (time() - $self->{last_check}) > 120 ) || ( $self->{map} ne $self->{server_map} ) || ( defined $host->{map} ) ) {
+        # After a map change, map and server_map (the map saved in the database) differ until the next server
+        # flush, up to 20 s later: one status query every 5 s then, not one for every event
+        my $since = time() - $self->{last_check};
+        if ( ( $since > 120 ) || ( $self->{map} ne $self->{server_map} && $since >= 5 ) || ( defined $host->{map} ) ) {
 
             $self->{last_check} = time();
             my $temp_map        = "";
@@ -1274,7 +1287,7 @@ sub setHlxCvars
     }
     $self->dorcon("hlxce_version \"".$::g_version."\"");
     
-    if ($self->{play_game} eq "MANI" && $self->dorcon("mani_hlx_prefix" =~ /gameme/i))
+    if ($self->{mod} eq "MANI" && ($self->dorcon("mani_hlx_prefix") // '') =~ /gameme/i)
     {
         $self->dorcon("mani_hlx_prefix \"HLstatsZ\"");
     }

@@ -871,16 +871,7 @@ sub doEvent_RoleSelection
                 $player->{playerid},
                 $role
             );
-            my $query = "
-                UPDATE
-                    hlstats_Roles
-                SET
-                    picked=picked+1
-                WHERE 
-                    game=?
-                    AND code=?
-                ";                    
-            exec_now($query,$g_servers{$s_addr}->{game},$role);
+            counter_add('role', $g_servers{$s_addr}->{game}, $role, 0, 0, 1);
             $player->updateDB();
         }
     }
@@ -1142,29 +1133,11 @@ sub doEvent_Frag
                     );
 
                     if ($killer->{role}) {
-                        my $query = "
-                            UPDATE
-                                hlstats_Roles
-                            SET
-                                kills=kills+1
-                            WHERE 
-                                game=?
-                                AND code=?
-                            ";
-                        exec_now($query,$g_servers{$s_addr}->{game},$killer->{role});
+                        counter_add('role', $g_servers{$s_addr}->{game}, $killer->{role}, 1, 0, 0);
                     }
 
                     if ($victim->{role}) {
-                        my $query = "
-                            UPDATE
-                                hlstats_Roles
-                            SET
-                                deaths=deaths+1
-                            WHERE 
-                                game=?
-                                AND code=?
-                            ";
-                        exec_now($query,$g_servers{$s_addr}->{game},$victim->{role});
+                        counter_add('role', $g_servers{$s_addr}->{game}, $victim->{role}, 0, 1, 0);
                     }
 
                     $killer->increment("total_kills");
@@ -1248,14 +1221,11 @@ sub doEvent_Frag
                     $g_servers{$s_addr}->increment("kills");
                     $g_servers{$s_addr}->increment("total_kills");
                     
-                    $update_data = "kills=kills+1";
-                    
                     if ($headshot == 1) {
                         $killer->increment("headshots");
                         $killer->increment("session_headshots");
                         $g_servers{$s_addr}->increment("headshots");
                         $g_servers{$s_addr}->increment("total_headshots");
-                        $update_data .= ", headshots=headshots+1";
                         
                         if ($headshotFromAction == 0) {
                             doEvent_PlayerAction(
@@ -1269,22 +1239,8 @@ sub doEvent_Frag
                     $victim->increment("session_deaths");
                     $victim->increment("session_skill", $v_skill);
 
-                    my $query = "
-                        UPDATE
-                            hlstats_Weapons
-                        SET    
-                            $update_data 
-                        WHERE
-                            game=?
-                            AND code=?
-                    ";
-                    exec_now($query,$g_servers{$s_addr}->{game},$weapon);
-                    
-                    $query = "
-                        INSERT INTO hlstats_Maps_Counts (game, map, kills, headshots)
-                        VALUES (?, ?, 1, $headshot)
-                        ON DUPLICATE KEY UPDATE kills=kills+1".(($headshot)?", headshots=headshots+1":"");
-                    exec_now($query,$g_servers{$s_addr}->{game},$g_servers{$s_addr}->get_map());
+                    counter_add('weapon', $g_servers{$s_addr}->{game}, $weapon, 1, $headshot ? 1 : 0);
+                    counter_add('map', $g_servers{$s_addr}->{game}, $g_servers{$s_addr}->get_map(), 1, $headshot ? 1 : 0);
                     
                     if ($g_servers{$s_addr}->{play_game} == L4D()) {
                         if ($victim->{team} eq "Infected" && $victim->{role} ne "infected" && $victim->{role}) {
@@ -1362,20 +1318,7 @@ sub doEvent_Frag
                     }
                 }
 
-                $update_data = "kills=kills+1";
-                if ($headshot == 1) {
-                    $update_data .= ", headshots=headshots+1";
-                }
-                my $query = "
-                    UPDATE
-                        hlstats_Weapons
-                    SET    
-                        $update_data 
-                    WHERE
-                        game=?
-                        AND code=?
-                ";
-                exec_now($query, $g_servers{$s_addr}->{game},$weapon);
+                counter_add('weapon', $g_servers{$s_addr}->{game}, $weapon, 1, $headshot ? 1 : 0);
                 $desc = "TEAMKILL: ";
             }
         }
@@ -1525,16 +1468,7 @@ sub doEvent_PlayerPlayerAction
                     $vz
                 );
                 
-                my $query = "
-                    UPDATE
-                        hlstats_Actions
-                    SET
-                        count=count+1 
-                    WHERE
-                        game= ?
-                        AND code = ?
-                ";
-                exec_now($query,$g_servers{$s_addr}->{game},$action);
+                counter_add('action', $g_servers{$s_addr}->{game}, $action, 1);
                 if ($reward_player != 0) {
                     my $victimreward = $reward_player * -1;
                     $player->increment("skill", $reward_player, 1);
@@ -1817,16 +1751,7 @@ sub doEvent_PlayerAction
                     $y,
                     $z
                 );
-                my $query = "
-                    UPDATE
-                        hlstats_Actions
-                    SET    
-                        count=count+1 
-                    WHERE
-                        game=?
-                        AND code = ?
-                ";
-                exec_now($query,$g_servers{$s_addr}->{game},$action);
+                counter_add('action', $g_servers{$s_addr}->{game}, $action, 1);
                 $player->increment("skill", $reward_player);
                 $player->increment("session_skill", $reward_player);
                 $p_name = getColor($player->{name},$player->{team});
@@ -1907,16 +1832,8 @@ sub doEvent_TeamAction
             if ($actionteam eq "") {
                 $actionteam = $team;
             }
-            my $query = "
-                UPDATE
-                    hlstats_Actions
-                SET    
-                    count=count+1 
-                WHERE
-                    game=?
-                    AND code IN (?, ?)
-            ";
-            exec_now($query,$g_servers{$s_addr}->{game},$g_servers{$s_addr}->get_map(),$action);
+            counter_add('action', $g_servers{$s_addr}->{game}, $map."_$action", 1);
+            counter_add('action', $g_servers{$s_addr}->{game}, $action, 1);
             
             if ($g_servers{$s_addr}->{round_status} == 0) {
                 if ($reward_team != 0) {
@@ -1975,16 +1892,8 @@ sub doEvent_WorldAction
             my $actionid = $g_games{$g_servers{$s_addr}->{game}}{actions}{$action}{id};
             my $reward_team = $g_games{$g_servers{$s_addr}->{game}}{actions}{$action}{reward_team};
             my $team = $g_games{$g_servers{$s_addr}->{game}}{actions}{$action}{team};
-            my $query = "
-                UPDATE
-                    hlstats_Actions
-                SET    
-                    count=count+1 
-                WHERE
-                    game=?
-                    AND code IN (?, ?)
-            ";
-            exec_now($query,$g_servers{$s_addr}->{game},$map."_$action",$action);
+            counter_add('action', $g_servers{$s_addr}->{game}, $map."_$action", 1);
+            counter_add('action', $g_servers{$s_addr}->{game}, $action, 1);
             if ($team && $reward_team != 0) {
                 rewardTeam($team, $reward_team, $actionid, $actionname);
             }

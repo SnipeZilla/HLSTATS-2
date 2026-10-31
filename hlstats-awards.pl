@@ -1371,7 +1371,7 @@ sub DoOptimize
         push(@g_allTables, $row);
     }
     foreach $table (@g_allTables) {
-        exec-now("
+        exec_now("
             OPTIMIZE TABLE $table
         ");
     }

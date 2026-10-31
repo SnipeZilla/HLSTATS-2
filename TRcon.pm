@@ -19,6 +19,7 @@ use IO::Socket::INET;
 use IO::Select;
 use bytes;
 use Scalar::Util;
+use Time::HiRes qw(time);
 
 do "$::opt_libdir/HLstats_GameConstants.plib";
 
@@ -47,7 +48,13 @@ sub new
   $self->{"auth"}                   = 0;
   $self->{"packet_id"}              = 10;
   $self->{rcon_err}                 = 0;
-  $self->{inbox} = {};
+  $self->{inbox}                    = {};   # replies that arrived for another request id
+  $self->{rbuf}                     = '';   # bytes read from the socket, not yet a whole packet
+  $self->{broken}                   = 0;    # this connection is closed or out of sync: reconnect
+  $self->{nowait}                   = {};   # request ids sent by execute_nowait: their replies are dropped
+  $self->{retry_at}                 = 0;    # after a failed connection or password: no new attempt before this time
+  $self->{retry_wait}               = 0;    # seconds between attempts, doubled after each failure
+  $self->{gc_at}                    = 0;    # next clean-up of nowait and inbox
   return $self;
 }
 
@@ -62,6 +69,28 @@ sub execute
     }
     return $answer;
   }  
+}
+
+#
+# Send a command without waiting for its reply (chat messages, kicks, bans: nothing reads the answer).
+# The reply is read and dropped later, by the next call that reads the socket. Returns 1 when sent.
+#
+sub execute_nowait
+{
+  my ($self, $command) = @_;
+  return 0 if $::g_stdin;
+  return 0 unless $self->_ready();
+
+  $self->_drain_nowait();
+  # Closed by the server since the last command: reconnect once before sending
+  return 0 if $self->{broken} && !$self->_ready();
+  # A server that stopped reading would block the daemon once the send buffer is full: drop the message
+  return 0 unless IO::Select->new($self->{"rcon_socket"})->can_write(0);
+
+  my $req_id = _next_req_id($self);
+  return 0 if $self->send_rcon($req_id, $SERVERDATA_EXECCOMMAND, $command);
+  $self->{nowait}{$req_id} = time();
+  return 1;
 }
 
 sub get_auth_code
@@ -86,90 +115,122 @@ sub get_auth_code
 
 }
 
+#
+# Open a new TCP connection; everything buffered for the old one is dropped
+#
+sub _connect
+{
+  my ($self) = @_;
+  my $server_object = $self->{"server_object"};
+
+  if ($self->{"rcon_socket"}) {
+      eval { shutdown($self->{"rcon_socket"}, 2); };
+      eval { $self->{"rcon_socket"}->close(); };
+      $self->{"rcon_socket"} = undef;
+      ::printEvent("RCON", "Closing TCP socket $!",1, "$server_object->{address}:$server_object->{port}");
+  }
+  $self->{rbuf}   = '';
+  $self->{broken} = 0;
+  $self->{inbox}  = {};
+  $self->{nowait} = {};
+  $self->{"auth"} = 0;
+
+  ::printEvent("RCON", "Attempting TCP socket",1, "$server_object->{address}:$server_object->{port}");
+
+  $self->{"rcon_socket"} = IO::Socket::INET->new(
+      Proto    => "tcp",
+      PeerAddr => $server_object->{address},
+      PeerPort => $server_object->{port},
+      Timeout  => $TIMEOUT,
+  );
+
+  unless ($self->{"rcon_socket"}) {
+      ::printEvent("RCON", "Cannot setup TCP socket $!",1, "$server_object->{address}:$server_object->{port}");
+      return 0;
+  }
+  ::printEvent("RCON", " TCP socket is now open",1, "$server_object->{address}:$server_object->{port}");
+  binmode($self->{"rcon_socket"}, ':raw');
+  $self->{"rcon_socket"}->autoflush(1);
+  return 1;
+}
+
+#
+# After a failed connection or password: no new attempt for 10 s, then 20 s, 40 s, then once a minute
+# (a server whose rcon cannot be reached, or refuses the password, costs no wait per command)
+#
+sub _retry_later
+{
+  my ($self) = @_;
+  my $wait = ($self->{retry_wait} || 5) * 2;
+  $self->{retry_wait} = $wait > 60 ? 60 : $wait;
+  $self->{retry_at}   = time() + $self->{retry_wait};
+}
+
+#
+# Connected and authenticated, connecting first when needed (not before retry_at after a failure)
+#
+sub _ready
+{
+  my ($self) = @_;
+  my $server_object = $self->{"server_object"};
+
+  return 1 if $self->{"rcon_socket"} && !$self->{rcon_err} && $self->{"auth"};
+  return 0 if $self->{retry_at} > time();
+
+  if (!$self->{"rcon_socket"} || $self->{rcon_err}) {
+      unless ($self->_connect()) {
+          $self->{rcon_err}++;
+          $self->_retry_later();
+          return 0;
+      }
+  }
+
+  unless ($self->{"rcon_socket"}->connected()) {
+      $self->{rcon_err}++;
+      $self->_retry_later();
+      return 0;
+  }
+
+  unless ($self->{"auth"}) {
+      ::printEvent("RCON", "Trying to get rcon access (auth)",1,"$server_object->{address}:$server_object->{port}");
+      if ($self->send_rcon($AUTH_PACKET_ID, $SERVERDATA_AUTH, $server_object->{rcon}, 1)) {
+          ::printEvent("RCON", "Couldn't send password", 1, "$server_object->{address}:$server_object->{port}");
+          $self->_retry_later();
+          return 0;
+      }
+      my ($id, $command) = $self->recieve_rcon($AUTH_PACKET_ID);
+      $self->get_auth_code($id) if $command == $SERVERDATA_AUTH_RESPONSE;
+      unless ($self->{"auth"}) {
+          $self->_retry_later();
+          return 0;
+      }
+  }
+  $self->{rcon_err}   = 0;
+  $self->{retry_at}   = 0;
+  $self->{retry_wait} = 0;
+  return 1;
+}
+
 sub sendrecv
 {
   my ($self, $msg, $splitted_answer) = @_;
 
-  my $server_object = $self->{"server_object"};
+  return unless $self->_ready();
+  $self->_drain_nowait();
+  # Closed by the server since the last command: reconnect once before sending
+  return if $self->{broken} && !$self->_ready();
 
-  if (!$self->{"rcon_socket"} || $self->{rcon_err} )  {
-
-      if ($self->{"rcon_socket"}) {
-          shutdown($self->{"rcon_socket"}, 2);
-          $self->{"rcon_socket"}->close();
-          $self->{"rcon_socket"} = undef;
-          ::printEvent("RCON", "Closing TCP socket $!",1, "$server_object->{address}:$server_object->{port}");
-      }
-
-      ::printEvent("RCON", "Attempting TCP socket",1, "$server_object->{address}:$server_object->{port}");
-
-      $self->{"rcon_socket"} = IO::Socket::INET->new(
-          Proto    => "tcp",
-          PeerAddr => $server_object->{address},
-          PeerPort => $server_object->{port},
-          Timeout  => $TIMEOUT,
-      );
-
-      unless ($self->{"rcon_socket"}) {
-          ::printEvent("RCON", "Cannot setup TCP socket $!",1, "$server_object->{address}:$server_object->{port}");
-      } else {
-          ::printEvent("RCON", " TCP socket is now open",1, "$server_object->{address}:$server_object->{port}");
-          binmode($self->{"rcon_socket"}, ':raw');
-          $self->{"rcon_socket"}->autoflush(1);
-      }
-
-      $self->{"auth"} = 0;
+  my $req_id;
+  if ($splitted_answer // 0) {
+      $req_id = $self->send_command_with_sentinel($msg);
+      return unless $req_id && $req_id !~ /^(?:0|1)$/;
+  } else {
+      $req_id = _next_req_id($self);
+      return if $self->send_rcon($req_id, $SERVERDATA_EXECCOMMAND, $msg);
   }
 
-  my $r_socket  = $self->{"rcon_socket"};
-  my $server    = $self->{"server_object"};
-  my $auth      = $self->{"auth"};
-  my $response  = "";
-
-  if (($r_socket) && ($r_socket->connected() )) {
-
-    if ($auth == 0)  {
-      ::printEvent("RCON", "Trying to get rcon access (auth)",1,"$server_object->{address}:$server_object->{port}");
-      if ($self->send_rcon($AUTH_PACKET_ID, $SERVERDATA_AUTH, $server->{rcon}, 1)) {
-        ::printEvent("RCON", "Couldn't send password", 1, "$server_object->{address}:$server_object->{port}");
-        return;
-      }
-      my ($id, $command, $response) = $self->recieve_rcon($AUTH_PACKET_ID);
-      if($command == $SERVERDATA_AUTH_RESPONSE) {
-        $auth = $self->get_auth_code($id);
-      } elsif (($command == $SERVERDATA_RESPONSE_VALUE) && ($id == $AUTH_PACKET_ID)) {  
-         #Source servers sends one junk packet during the authentication step, before it responds 
-         # with the correct authentication response.  
-         ::printEvent("RCON", "Junk packet from Source Engine",3, "$server_object->{address}:$server_object->{port}");
-         my ($id, $command, $response) = $self->recieve_rcon($AUTH_PACKET_ID);
-         $auth = $self->get_auth_code($id);
-      }
-
-    }
-
-    if ($auth == 1)  {
-
-        my $req_id;
-        $self->{rcon_err} = 0;
-
-        if ($splitted_answer // 0) {
-            $req_id = $self->send_command_with_sentinel($msg);
-            return unless $req_id && $req_id !~ /^(?:0|1)$/;
-        } else {
-            $req_id = _next_req_id($self);
-            return if $self->send_rcon($req_id, $SERVERDATA_EXECCOMMAND, $msg);
-        }
-
-        my ($id, $command, $response) = $self->recieve_rcon($req_id, $splitted_answer);
-        return $response;
-
-    }
-
-  } else {
-     $self->{rcon_err}++;
-  } 
-  return;
-  
+  my ($id, $command, $response) = $self->recieve_rcon($req_id, $splitted_answer);
+  return $response;
 }
 
 sub destroy {
@@ -179,7 +240,11 @@ sub destroy {
         eval { $self->{rcon_socket}->close(); };
         $self->{rcon_socket} = undef;
     }
-    $self->{auth} = 0;
+    $self->{auth}   = 0;
+    $self->{rbuf}   = '';
+    $self->{broken} = 0;
+    $self->{nowait} = {};
+    $self->{inbox}  = {};
     return 1;
 }
 
@@ -207,7 +272,10 @@ sub send_rcon
 {
     my ($self, $id, $command, $string1, $string2) = @_;
     my $sock = $self->{"rcon_socket"};
-    return 1 unless $sock && $sock->connected() && $sock->peeraddr();
+    unless ($sock && $sock->connected()) {
+        if ($sock) { $self->{rcon_err}++; $self->{broken} = 1; }    # reset by the server: reconnect
+        return 1;
+    }
 
     my $data = _rcon_pack($id, $command, $string1 // '');
     return 1 unless defined $data;
@@ -217,13 +285,16 @@ sub send_rcon
         return 1;
     }
 
+    # $! is only meaningful when syswrite failed (it can hold an old error after a good write)
     my $n = syswrite($sock, $data);
-    if ($!) {
+    unless (defined $n && $n == length($data)) {
         $self->{rcon_err}++;
-        ::printEvent("RCON", "$!",1,"$self->{server_object}->{address}:$self->{server_object}->{port}");
+        $self->{broken} = 1;
+        ::printEvent("RCON", defined $n ? "Short write ($n of ".length($data)." bytes)" : "Socket write error $!",1,
+            "$self->{server_object}->{address}:$self->{server_object}->{port}");
+        return 1;
     }
-
-    return ($n // 0) == length($data) ? 0 : 1;
+    return 0;
 }
 
 sub send_command_with_sentinel
@@ -239,57 +310,100 @@ sub send_command_with_sentinel
 #
 #  Recieve a package
 #
-sub _read_exact {
-    my ($sock, $len) = @_;
-    my $buf = '';
-
-    while (length($buf) < $len) {
-        my $n = sysread($sock, my $chunk, $len - length($buf));
-
-        if (defined $n) {
-            return undef if $n == 0;  # EOF
-            $buf .= $chunk;
-        } else {
-            ::printEvent("RCON", "Socket read error $!", 1);
-            return undef;
-        }
-    }
-
-    return $buf;
-}
-
-sub _recv_one_packet {
-    my ($sock, $timeout, $self) = @_;
+#
+# Read what the socket has within $timeout seconds into the buffer.
+# Returns the byte count, 0 on timeout, undef when the connection is closed or broken.
+#
+sub _fill
+{
+    my ($self, $timeout) = @_;
+    my $sock = $self->{"rcon_socket"} or return undef;
 
     my $sel = IO::Select->new($sock);
+    return 0 unless $sel->can_read($timeout > 0 ? $timeout : 0);
 
-    unless ($sel->can_read($timeout)) {
-        ::printEvent("RCON", "Socket can't read: stalled or crashed", 1, "$self->{server_object}->{address}:$self->{server_object}->{port}");
-        return;
+    my $n = sysread($sock, my $chunk, 65536);
+    unless ($n) {
+        ::printEvent("RCON", defined $n ? "Connection closed by the server" : "Socket read error $!", 1,
+            "$self->{server_object}->{address}:$self->{server_object}->{port}");
+        $self->{rcon_err}++;
+        $self->{broken} = 1;
+        return undef;
     }
+    $self->{rbuf} .= $chunk;
+    return $n;
+}
 
-    my $hdr = _read_exact($sock, 4);
-    unless ($hdr) {
-        ::printEvent("RCON", "Failed to read packet header", 1, "$self->{server_object}->{address}:$self->{server_object}->{port}");
-        return;
-    }
+#
+# One whole packet off the buffer: (id, type, body), or () when it is not all there yet
+#
+sub _take_packet
+{
+    my ($self) = @_;
+    return () if length($self->{rbuf}) < 4;
 
-    my $len = unpack('V', $hdr);
+    my $len = unpack('V', $self->{rbuf});
     if ($len < 10 || $len > 65536) {
         ::printEvent("RCON", "Invalid packet length: $len", 1, "$self->{server_object}->{address}:$self->{server_object}->{port}");
-        return;
+        $self->{rbuf} = '';
+        $self->{rcon_err}++;
+        $self->{broken} = 1;    # framing lost: reconnect
+        return ();
     }
+    return () if length($self->{rbuf}) < 4 + $len;
 
-    my $payload = _read_exact($sock, $len);
-    unless ($payload) {
-        ::printEvent("RCON", "Failed to read packet payload (len=$len)", 1,"$self->{server_object}->{address}:$self->{server_object}->{port}");
-        return;
-    }
-
-    my ($id, $type, $rest) = unpack('V V a*', $payload);
-    $rest =~ s/\x00{2}\z//;
-
+    my $payload = substr($self->{rbuf}, 4, $len);
+    substr($self->{rbuf}, 0, 4 + $len, '');
+    my ($id, $type, $rest) = unpack('l< l< a*', $payload);
+    $rest =~ s/\x00{1,2}\z//;
     return ($id, $type, $rest);
+}
+
+#
+# Next whole packet, waiting at most $timeout seconds: (id, type, body) or () on timeout or error
+#
+sub _next_packet
+{
+    my ($self, $timeout) = @_;
+    my $deadline = time() + $timeout;
+
+    while (1) {
+        my @packet = $self->_take_packet();
+        return @packet if @packet;
+        return () if $self->{broken};
+
+        my $remain = $deadline - time();
+        return () if $remain <= 0;
+        my $got = $self->_fill($remain);
+        return () unless defined $got;
+    }
+}
+
+#
+# Read and drop the replies to commands sent by execute_nowait, without waiting.
+# Any other packet is kept in the inbox for the request that asked for it.
+#
+sub _drain_nowait
+{
+    my ($self) = @_;
+    return unless $self->{"rcon_socket"};
+
+    for (1 .. 16) {
+        last unless $self->_fill(0);
+    }
+    while (my ($id, $type, $body) = $self->_take_packet()) {
+        next if delete $self->{nowait}{$id};
+        _inbox_push($self, $id, $type, $body);
+    }
+
+    # Every 10 s: forget the ids whose reply never came, and old packets nobody asked for
+    my $now = time();
+    return if $now < ($self->{gc_at} // 0);
+    $self->{gc_at} = $now + 10;
+    for my $id (keys %{ $self->{nowait} }) {
+        delete $self->{nowait}{$id} if $now - $self->{nowait}{$id} > 30;
+    }
+    _inbox_gc($self, 5);
 }
 
 sub recieve_rcon
@@ -316,13 +430,16 @@ sub recieve_rcon
         my $remain = $deadline - time();
         last if $remain <= 0;
 
-        my ($id, $type, $body) = _recv_one_packet($sock, $remain, $self);
+        my ($id, $type, $body) = $self->_next_packet($remain);
         last unless defined $id;  # EOF/timeout at socket level
+
+        # A reply to a message sent without waiting
+        next if delete $self->{nowait}{$id};
 
         # Auth path: allow Source junk packet then real auth response
         if ($packet_id == $AUTH_PACKET_ID) {
             if ($type == $SERVERDATA_RESPONSE_VALUE && $id == $AUTH_PACKET_ID) {
-                ($id, $type, $body) = _recv_one_packet($sock, $remain, $self);
+                ($id, $type, $body) = $self->_next_packet($deadline - time());
                 return (-1, -1, undef) unless defined $id;
             }
             return ($id, $type, $body // '');
@@ -374,7 +491,6 @@ sub _inbox_gc
     my $now = time;
     for my $id (keys %{ $self->{inbox} || {} }) {
         my $ent = $self->{inbox}{$id} or next;
-        next if $ent->{done};
         delete $self->{inbox}{$id} if ($now - ($ent->{t} || $now)) > $max_age;
     }
 }

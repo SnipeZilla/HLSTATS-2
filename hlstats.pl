@@ -324,6 +324,62 @@ sub flushEventTable {
 }
 
 #
+# Counters: kills and headshots per weapon and per map, actions, roles.
+#
+# counter_add() adds to a total kept in memory; counters_flush() writes the totals every 3 seconds with one
+# statement per weapon, map, action or role, instead of one statement for every kill.
+#
+our %g_counters;    # kind => game => code => [n1, n2, n3, failed writes]
+
+my %counter_sql = (
+    weapon => "UPDATE hlstats_Weapons SET kills = kills + ?, headshots = headshots + ? WHERE game = ? AND code = ?",
+    map    => "INSERT INTO hlstats_Maps_Counts (game, map, kills, headshots) VALUES (?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE kills = kills + ?, headshots = headshots + ?",
+    action => "UPDATE hlstats_Actions SET count = count + ? WHERE game = ? AND code = ?",
+    role   => "UPDATE hlstats_Roles SET kills = kills + ?, deaths = deaths + ?, picked = picked + ? WHERE game = ? AND code = ?",
+);
+
+sub counter_bind {
+    my ($kind, $game, $code, $n) = @_;
+    return ($n->[0], $n->[1], $game, $code)                   if $kind eq 'weapon';    # kills, headshots
+    return ($game, $code, $n->[0], $n->[1], $n->[0], $n->[1]) if $kind eq 'map';       # kills, headshots
+    return ($n->[0], $game, $code)                            if $kind eq 'action';    # count
+    return ($n->[0], $n->[1], $n->[2], $game, $code);                                  # role: kills, deaths, picked
+}
+
+# counter_add('weapon', $game, $weapon, $kills, $headshots)
+sub counter_add {
+    my ($kind, $game, $code, @n) = @_;
+    return unless defined $code && $code ne '';
+    my $c = ($g_counters{$kind}{$game // ''}{$code} //= [0, 0, 0, 0]);
+    $c->[$_] += ($n[$_] // 0) for 0 .. 2;
+}
+
+sub counters_flush {
+    for my $kind (sort keys %g_counters) {
+        for my $game (sort keys %{ $g_counters{$kind} }) {
+            my $codes = $g_counters{$kind}{$game};
+            for my $code (sort keys %$codes) {
+                # taken out first: a flush run by a signal handler meanwhile does not write it twice
+                my $n = delete $codes->{$code} or next;
+                next if eval { exec_cache("counter_$kind", $counter_sql{$kind}, counter_bind($kind, $game, $code, $n)) };
+
+                # Not written: keep it for the next flush. A total the database refused 3 times is dropped.
+                my $died = $@;
+                my $c = ($codes->{$code} //= [0, 0, 0, 0]);
+                $c->[$_] += $n->[$_] for 0 .. 2;
+                $c->[3] = $n->[3] + ($died ? 0 : 1);    # no database connection: not counted
+                if ($c->[3] >= 3) {
+                    delete $codes->{$code};
+                    printEvent("MYSQL", "Dropped the $kind counter $game/$code after 3 failed writes", 1);
+                }
+                die $died if $died;
+            }
+        }
+    }
+}
+
+#
 # array calcSkill (int skill_mode, int killerSkill, int killerKills, int victimSkill, int victimKills, string weapon)
 #
 # Returns an array, where the first index contains the killer's new skill, and
@@ -1339,6 +1395,7 @@ sub flushAll
 {
     # we only need to flush events if we're about to shut down. they are unaffected by server/player deletion
     my ($flushevents) = @_;
+    counters_flush();
     if ($flushevents)
     {
         while ( my ($table, $colsref) = each(%g_eventTables) )
@@ -1550,7 +1607,7 @@ sub handleIncoming
 
         if ($data[1] eq "KILL") {
             printEvent("CONTROL", "SHUTTING DOWN SCRIPT", 1);
-            flushAll();
+            flushAll(1);
             my $dest = sockaddr_in($port, inet_aton($address));
             my $msg = "Shutting down HLstatsZ Daemon...Goodbye...";
             send($::udp_socket, $msg, 0, $dest); #reply to front end       
@@ -3563,7 +3620,9 @@ if ($g_stdin) {
     $start_parse_time  = time();
     $import_logs_count = 0;
     printEvent("IMPORT", "Start importing logs. Every dot signs 500 parsed lines", 1);
+    my $stdin_lines = 0;
     while (my $loop = getLine()) {
+        counters_flush() if ++$stdin_lines % 5000 == 0;
         my $s_output = $loop;
         if (($import_logs_count > 0) && ($import_logs_count % 500 == 0)) {
             my $parse_time = $ev_unixtime - $start_parse_time;
@@ -3646,6 +3705,10 @@ if ($g_stdin == 0) {
     };
     if ($udp_socket) {
         $udp_socket->blocking(0);
+        # Room for the lines that arrive while the daemon is busy (a slow query, an rcon timeout): the default
+        # receive buffer (64 KB on Windows) overflows within a second during a storm, and those lines are lost
+        setsockopt($udp_socket, SOL_SOCKET, SO_RCVBUF, 8 * 1024 * 1024)
+            or printEvent("UDP", "Could not enlarge the UDP receive buffer: $!", 1);
         printEvent("UDP", "Opening UDP listen socket on port:$s_port ... OK", 1);
         my $loop = Mojo::IOLoop->singleton;
         $loop->reactor->io($udp_socket => sub {
@@ -3726,9 +3789,13 @@ if ($g_stdin == 0) {
     Mojo::IOLoop->recurring(3 => sub {
         return if $handlingdata;
         $handlingdata = 1;
-        handleData();
-        $handlingdata = 0;
+        my $ok = eval { handleData(); 1 };
+        $handlingdata = 0;      # also after an error, or handleData would never run again
+        die $@ unless $ok;      # reported by the reactor, as before
     });
+
+    # Weapon, map, action and role counters
+    Mojo::IOLoop->recurring(3 => \&counters_flush);
 
     # Start HLstatsZ
     Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
