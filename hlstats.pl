@@ -3785,14 +3785,7 @@ if ($g_stdin == 0) {
     }
 
     # Handle Data
-    my $handlingdata = 0;
-    Mojo::IOLoop->recurring(3 => sub {
-        return if $handlingdata;
-        $handlingdata = 1;
-        my $ok = eval { handleData(); 1 };
-        $handlingdata = 0;      # also after an error, or handleData would never run again
-        die $@ unless $ok;      # reported by the reactor, as before
-    });
+    Mojo::IOLoop->recurring(3 => sub { handleData() });
 
     # Weapon, map, action and role counters
     Mojo::IOLoop->recurring(3 => \&counters_flush);
