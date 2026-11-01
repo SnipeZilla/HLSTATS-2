@@ -963,6 +963,12 @@ sub DoRibbons {
         }
     }
 
+    # Every game's ribbons are given: the web page (awards_ribbons.php) keeps its ribbon list until this date changes
+    exec_now("
+        REPLACE INTO hlstats_Options (keyname, value, opttype)
+        VALUES ('ribbons_date', NOW(), 2)
+    ");
+
     print "done\n";
 }
 
