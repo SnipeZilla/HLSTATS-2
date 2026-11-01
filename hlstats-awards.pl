@@ -963,7 +963,7 @@ sub DoRibbons {
         }
     }
 
-    # Every game's ribbons are given: the web page (awards_ribbons.php) keeps its ribbon list until this date changes
+    # Each game's ribbons are awarded, and the webpage (awards_ribbons.php) caches its ribbon list until the date changes.
     exec_now("
         REPLACE INTO hlstats_Options (keyname, value, opttype)
         VALUES ('ribbons_date', NOW(), 2)
