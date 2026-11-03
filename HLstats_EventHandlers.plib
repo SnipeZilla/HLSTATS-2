@@ -16,59 +16,49 @@ sub get_fav_weapon  {
     my ($player)  = @_;
     my $p_connect_time = $player->{connect_time};
    
+    # His kills by weapon, read on the killer index alone (updater 93 adds the weapon and the headshot to it). A
+    # player's id is of one game, so its servers need no join: the join read every kill of his from the table.
     my $result = query_now("
         SELECT
-            hlstats_Events_Frags.weapon,
-            COUNT(hlstats_Events_Frags.weapon) AS kills,
-            SUM(hlstats_Events_Frags.headshot=1) as headshots
+            weapon,
+            COUNT(*) AS kills,
+            SUM(headshot=1) as headshots
         FROM
-            hlstats_Events_Frags,hlstats_Servers
+            hlstats_Events_Frags
         WHERE
-            hlstats_Servers.serverId=hlstats_Events_Frags.serverId
-            AND hlstats_Servers.game= ? AND hlstats_Events_Frags.killerId= ?
+            killerId= ?
         GROUP BY
-            hlstats_Events_Frags.weapon
+            weapon
         ORDER BY
             kills desc, headshots desc
-        LIMIT 1    
-    ",$g_servers{$s_addr}->{game},$player->{playerid});
+        LIMIT 1
+    ",$player->{playerid});
     my ($fav_weapon, $fav_weapon_kills, $fav_weapon_headshots) = $result->fetchrow_array;
     $result->finish;
 
     my $result2 = query_now("
         SELECT
-            IFNULL(ROUND((SUM(hlstats_Events_Statsme.hits) / SUM(hlstats_Events_Statsme.shots) * 100), 0), 0) AS acc
+            IFNULL(ROUND((SUM(hits) / SUM(shots) * 100), 0), 0) AS acc
         FROM
-            hlstats_Events_Statsme, hlstats_Servers
+            hlstats_Events_Statsme
         WHERE
-            hlstats_Servers.serverId=hlstats_Events_Statsme.serverId
-            AND hlstats_Servers.game=? AND hlstats_Events_Statsme.PlayerId=?
-            AND hlstats_Events_Statsme.weapon= ?
-        LIMIT 0,1    
-    ",$g_servers{$s_addr}->{game},$player->{playerid},$fav_weapon);
+            playerId=?
+            AND weapon= ?
+    ",$player->{playerid},$fav_weapon);
     my ($fav_weapon_sm_acc) = $result2->fetchrow_array;
     $result2->finish;
 
-    my $result3 = query_now("
-        SELECT
-            hlstats_Events_Frags.weapon,
-            COUNT(hlstats_Events_Frags.weapon) AS kills,
-            SUM(hlstats_Events_Frags.headshot=1) as headshots
-        FROM
-            hlstats_Events_Frags,hlstats_Servers
-        WHERE
-            hlstats_Servers.serverId=hlstats_Events_Frags.serverId
-            AND hlstats_Servers.game=? AND hlstats_Events_Frags.killerId=?
-            AND (hlstats_Events_Frags.eventTime > FROM_UNIXTIME(?))
-        GROUP BY
-            hlstats_Events_Frags.weapon
-        ORDER BY
-            kills desc, headshots desc
-        LIMIT 0, 1    
-    ",$g_servers{$s_addr}->{game},$player->{playerid},$p_connect_time);
-
-    my ($s_fav_weapon, $s_fav_weapon_kills, $s_fav_weapon_headshots) = $result3->fetchrow_array;
-    $result3->finish;
+    # The session's favorite weapon, from his kills the daemon counted by weapon (doEvent_Frag): the kills table has
+    # no index on the time, so the session's kills could only be found among all of his
+    my ($s_fav_weapon, $s_fav_weapon_kills, $s_fav_weapon_headshots) = (undef, 0, 0);
+    my $session = $player->{session_weapons} || {};
+    foreach my $code (sort keys %$session) {
+        my $kills     = $session->{$code}{kills}     || 0;
+        my $headshots = $session->{$code}{headshots} || 0;
+        if (($kills > $s_fav_weapon_kills) || ($kills == $s_fav_weapon_kills && $headshots > $s_fav_weapon_headshots)) {
+            ($s_fav_weapon, $s_fav_weapon_kills, $s_fav_weapon_headshots) = ($code, $kills, $headshots);
+        }
+    }
     my $s_fav_weapon_sm_acc = 0;
    
     if (($s_fav_weapon) && ($s_fav_weapon_kills > 0)) {
@@ -88,22 +78,28 @@ sub get_fav_weapon  {
         $result4->finish;
     }
    
-    return ($fav_weapon ? $g_games{$g_servers{$s_addr}->{game}}{weapons}{$fav_weapon}{name} : "-", $fav_weapon_kills, $fav_weapon_sm_acc, $s_fav_weapon ? $g_games{$g_servers{$s_addr}->{game}}{weapons}{$s_fav_weapon}{name} : "-", $s_fav_weapon_kills // 0, $s_fav_weapon_sm_acc // 0);
+    # A weapon's name, or its code when the game has no such weapon (not in Admin > Weapons, or added since the daemon
+    # started). Read without adding the code to the game's weapons: calcSkill() takes any entry there for a known
+    # weapon, and an empty one has no modifier, so the kills with it would only score the minimum change
+    my $weapons = $g_games{$g_servers{$s_addr}->{game}}{weapons};
+    my $name    = sub {
+        my ($code) = @_;
+        return "-" unless $code;
+        my $weapon = $weapons ? $weapons->{$code} : undef;
+        return ($weapon && defined($weapon->{name})) ? $weapon->{name} : $code;
+    };
+
+    return ($name->($fav_weapon), $fav_weapon_kills, $fav_weapon_sm_acc, $name->($s_fav_weapon), $s_fav_weapon_kills // 0, $s_fav_weapon_sm_acc // 0);
 }
 
 sub get_next_ranks
 {
     my ($player)  = @_;
 
-    my $result = query_now("
-        SELECT
-            $g_ranktype,
-            kills / IF(deaths=0,1,deaths) AS kpd
-        FROM
-            hlstats_Players
-        WHERE
-            playerId=?",$player->{playerid});
-    my ($base, $kpd) = $result->fetchrow_array;
+    # The ranking's columns, as getRank ranks
+    my ($r1, $r2, $cmp, $index) = HLstats_Player::rankColumns();
+    my $result = query_now("SELECT $r1, $r2 FROM hlstats_Players WHERE playerId=?", $player->{playerid});
+    my ($base, $second) = $result->fetchrow_array;
     $result->finish;
     my $playerName = $player->{name};
 
@@ -115,34 +111,44 @@ sub get_next_ranks
 
     my $osd_message = "->1 - Next Players\\n";
     my $position = sprintf("   %02d  %s - %s", $ranknumber, number_format($base), $playerName)."\\n";
-   
-    my $result2 = query_now("
-        SELECT
-            playerId,
-            lastName,
-            $g_ranktype,
-            kills / IF(deaths=0,1,deaths) AS kpd
-        FROM
-            hlstats_Players
-        WHERE
-            game=?
-            AND $g_ranktype > ?
-            AND hideranking = 0
-            AND kills >= 1
-            AND playerId <> ?
-        ORDER BY $g_ranktype DESC, kpd ASC
-        LIMIT 0,5
-    ", $player->{game}, $base, $player->{playerid});
 
-    my $i = $ranknumber-$result2->rows-1;
-    while (my ($playerId, $lastName, $p_base, $kpd) = $result2->fetchrow_array) {
+    # The 5 players ranked just above him, best first: read the closest first on the ranking index, with a 6th to know
+    # whether the first shown ties with the player before him
+    my @above = ();
+    my $before;
+    if ($ranknumber > 1) {
+        my $order   = ($cmp eq ">") ? "$r1 ASC, $r2 ASC" : "$r1 ASC, $r2 DESC";
+        my $result2 = query_now("
+            SELECT lastName, $r1, $r2
+            FROM hlstats_Players " . HLstats_Player::rankIndexHint($index) . "
+            WHERE " . HLstats_Player::rankAbove() . "
+            ORDER BY $order, connection_time ASC, playerId ASC
+            LIMIT 6
+        ", $player->{game}, $base, $base, $second);
+        while (my @row = $result2->fetchrow_array) {
+            push(@above, [@row]);
+        }
+        $result2->finish;
+        $before = pop(@above) if (@above > 5);
+        @above  = reverse(@above);
+    }
+
+    # They hold the last places above him; players level on both columns share the rank of the first of them
+    my $place = $ranknumber - scalar(@above);
+    my $rank  = 0;
+    for my $i (0 .. $#above) {
+        my ($lastName, $p_base, $p_second) = @{$above[$i]};
+        my $prev = $i ? $above[$i-1] : $before;
+        if (!$prev || $prev->[1] != $p_base || $prev->[2] != $p_second) {
+            $rank = $place + $i;
+        } elsif (!$i) {
+            $rank = HLstats_Player::rankOf($player->{game}, $p_base, $p_second);
+        }
         if (length($lastName) > 20) {
             $lastName = substr($lastName, 0, 17)."...";
         }
-        $i++;
-        $osd_message .= sprintf("   %02d  %s - %s", $i, number_format($p_base), $lastName)."\\n";
+        $osd_message .= sprintf("   %02d  %s - %s", $rank, number_format($p_base), $lastName)."\\n";
     }
-    $result2->finish;
     $osd_message .= $position;
 
     return ($ranknumber, $g_games{$player->{game}}->getTotalPlayers(), $osd_message);
@@ -378,9 +384,8 @@ sub doEvent_Connect
             $desc = "(IGNORED) BOT: ";
         } else {
             $player->set("connect_time", time());
-            my $player_rank = 0;
-            $player_rank = $player->getRank();
             if ($player->{is_bot} == 0 && $min_players_rank > 0) {
+                my $player_rank = $player->getRank();
                 if ($player_rank > $min_players_rank || $player_rank == 0) {
                     my $steamid = $player->{uniqueid};
                     my $p_steamid = $player->{plain_uniqueid};
@@ -404,7 +409,7 @@ sub doEvent_Connect
                 $hostname,
                 $hostgroup
             );
-        }        
+        }
     }
     else
     {
@@ -1218,12 +1223,14 @@ sub doEvent_Frag
                     $killer->increment("session_skill", $k_skill);
                     $killer->increment("kills");
                     $killer->increment("session_kills");
+                    $killer->{session_weapons}{$weapon}{kills}++;    # the session's favorite weapon (get_fav_weapon)
                     $g_servers{$s_addr}->increment("kills");
                     $g_servers{$s_addr}->increment("total_kills");
                     
                     if ($headshot == 1) {
                         $killer->increment("headshots");
                         $killer->increment("session_headshots");
+                        $killer->{session_weapons}{$weapon}{headshots}++;
                         $g_servers{$s_addr}->increment("headshots");
                         $g_servers{$s_addr}->increment("total_headshots");
                         

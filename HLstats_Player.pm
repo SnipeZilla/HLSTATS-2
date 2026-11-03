@@ -83,6 +83,7 @@ sub new
     $self->{session_shots}       = 0;
     $self->{session_hits}        = 0;
     $self->{session_start_pos}   = -1;
+    $self->{session_weapons}     = {};    # kills and headshots by weapon (doEvent_Frag), for the session's favorite
 
     $self->{map_kills}           = 0;
     $self->{map_deaths}          = 0;
@@ -843,41 +844,79 @@ sub geoUpdate {
     );
 }
 
+#
+# The ranking, as the web pages rank (includes/players_rank.php): RANK() OVER (ORDER BY skill DESC, kills DESC), or
+# kills DESC, deaths ASC when the ranking type is kills. A rank is 1 + the players ranked above, counted on the ranking
+# index: ranking the whole game for one player sorts every player of it.
+#
+
+# [first column, second column, comparison of the second for the players ranked above, ranking index]
+sub rankColumns
+{
+    return ($::g_ranktype ne "kills")
+        ? ("skill", "kills", ">", "ranking")
+        : ("kills", "deaths", "<", "ranking_kills");
+}
+
+# SQL: the players of a game's ranking ranked above a place; binds: the game, the place's first column twice, its second
+sub rankAbove
+{
+    my ($r1, $r2, $cmp) = rankColumns();
+    return "game = ? AND hideranking = 0 AND lastAddress <> '' AND ($r1 > ? OR ($r1 = ? AND $r2 $cmp ?))";
+}
+
+# The ranking index named for a query, once the updater has added it (checked once): without the name MySQL counts on
+# the game index, reading every player of the game
+my %rank_hint = ();
+sub rankIndexHint
+{
+    my ($index) = @_;
+    unless (defined $rank_hint{$index}) {
+        my $result = ::query_now("SHOW INDEX FROM hlstats_Players WHERE Key_name = '$index'");
+        my @row = $result ? $result->fetchrow_array : ();
+        $result->finish if $result;
+        $rank_hint{$index} = @row ? "FORCE INDEX ($index)" : "";
+    }
+    return $rank_hint{$index};
+}
+
+# The rank of a place [first column, second column] in the ranking of $game
+sub rankOf
+{
+    my ($game, $v1, $v2) = @_;
+    my ($r1, $r2, $cmp, $index) = rankColumns();
+    my $hint = rankIndexHint($index);
+
+    my $result = ::exec_cache("rank_count_$r1" . ($hint ? "_index" : ""),
+        "SELECT COUNT(*) + 1 FROM hlstats_Players $hint WHERE " . rankAbove(),
+        $game, $v1, $v1, $v2);
+    return 0 unless $result;
+    my ($rank) = $result->fetchrow_array;
+    $result->finish;
+
+    return $rank // 0;
+}
+
+# The rank of the player, 0 when he is not in the ranking
 sub getRank
 {
     my ($self) = @_;
 
-    my $pid  = $self->{playerid};
-    my $game = $self->{game};
-
-    my ($cache_key, $order_by);
-    if ($::g_ranktype ne "kills") {
-        $cache_key = "rank_skill_window";
-        $order_by  = "skill DESC, kills DESC";
-    } else {
-        $cache_key = "rank_kills_window";
-        $order_by  = "kills DESC, kills / IF(deaths=0,1,deaths) DESC";
-    }
-
-    my $query = "
-        SELECT rank_pos
-        FROM (
-            SELECT
-                playerId,
-                RANK() OVER (ORDER BY $order_by) AS rank_pos
-            FROM hlstats_Players
-            WHERE game = ?
-              AND hideranking = 0
-              AND lastAddress <> ''
-        ) ranked
+    my ($r1, $r2) = rankColumns();
+    my $result = ::exec_cache("rank_player_$r1", "
+        SELECT $r1, $r2
+        FROM hlstats_Players
         WHERE playerId = ?
-    ";
+          AND game = ?
+          AND hideranking = 0
+          AND lastAddress <> ''
+    ", $self->{playerid}, $self->{game});
+    return 0 unless $result;
+    my ($v1, $v2) = $result->fetchrow_array;
+    $result->finish;
+    return 0 unless defined $v1;
 
-    my $rankresult = ::exec_cache($cache_key, $query, $game, $pid);
-    my ($rank) = $rankresult->fetchrow_array;
-    $rankresult->finish;
-
-    return $rank // 0;
+    return rankOf($self->{game}, $v1, $v2);
 }
 
 sub updateTrackable

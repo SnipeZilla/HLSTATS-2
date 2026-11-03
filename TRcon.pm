@@ -20,11 +20,16 @@ use IO::Select;
 use bytes;
 use Scalar::Util;
 use Time::HiRes qw(time);
+use Mojo::IOLoop;
+use Mojo::IOLoop::Client;
 
 do "$::opt_libdir/HLstats_GameConstants.plib";
 
 my $VERSION = "2.00";
 my $TIMEOUT = 2.0;
+my $RETRY_EVERY = 1;      # seconds between attempts while the server cannot be reached
+my $QUEUE_MAX   = 100;    # messages kept while a connection is being opened ...
+my $QUEUE_TTL   = 10;     # ... for this many seconds at most
 
 my $SERVERDATA_EXECCOMMAND        = 2;
 my $SERVERDATA_AUTH               = 3;
@@ -45,6 +50,7 @@ sub new
   $self->{"rcon_socket"}            = 0;
   $self->{"server_object"}          = $server_object;
   Scalar::Util::weaken($self->{"server_object"});
+  $self->{addr}                     = "$server_object->{address}:$server_object->{port}";
   $self->{"auth"}                   = 0;
   $self->{"packet_id"}              = 10;
   $self->{rcon_err}                 = 0;
@@ -52,9 +58,15 @@ sub new
   $self->{rbuf}                     = '';   # bytes read from the socket, not yet a whole packet
   $self->{broken}                   = 0;    # this connection is closed or out of sync: reconnect
   $self->{nowait}                   = {};   # request ids sent by execute_nowait: their replies are dropped
-  $self->{retry_at}                 = 0;    # after a failed connection or password: no new attempt before this time
-  $self->{retry_wait}               = 0;    # seconds between attempts, doubled after each failure
   $self->{gc_at}                    = 0;    # next clean-up of nowait and inbox
+  $self->{tried}                    = 0;    # the first connection is opened at once, every later one in the background
+  $self->{connecting}               = 0;    # a connection is being opened in the background
+  $self->{retry_at}                 = 0;    # no new attempt before this time (a second after a failure)
+  $self->{retry_wait}               = 0;    # after a refused password: seconds between attempts, doubled each time
+  $self->{queue}                    = [];   # [time, command] given to execute_nowait while not connected
+  $self->{down_since}               = 0;    # the connection has not worked since then
+  $self->{down_logged}              = 0;
+  $self->{destroyed}                = 0;
   return $self;
 }
 
@@ -73,18 +85,32 @@ sub execute
 
 #
 # Send a command without waiting for its reply (chat messages, kicks, bans: nothing reads the answer).
-# The reply is read and dropped later, by the next call that reads the socket. Returns 1 when sent.
+# The reply is read and dropped by the event loop. Returns 1 when sent.
+# While a connection is being opened, the command waits for it ($QUEUE_TTL seconds at most).
 #
 sub execute_nowait
 {
   my ($self, $command) = @_;
   return 0 if $::g_stdin;
-  return 0 unless $self->_ready();
 
-  $self->_drain_nowait();
-  # Closed by the server since the last command: reconnect once before sending
-  return 0 if $self->{broken} && !$self->_ready();
-  # A server that stopped reading would block the daemon once the send buffer is full: drop the message
+  if ($self->_ready()) {
+      $self->_drain_nowait();
+      return 1 if !$self->{broken} && $self->_send_nowait($command);
+      # A server that stopped reading (its buffer is full): the message is dropped
+      return 0 unless $self->{broken};
+      # Closed by the server: a new connection is opened in the background, and the message waits for it
+      $self->_lost("Connection closed by the server");
+  }
+  my $queue = $self->{queue};
+  push @$queue, [time(), $command];
+  shift @$queue while @$queue > $QUEUE_MAX;
+  return 0;
+}
+
+sub _send_nowait
+{
+  my ($self, $command) = @_;
+  # A server that stopped reading would block the daemon once the send buffer is full: the message is dropped
   return 0 unless IO::Select->new($self->{"rcon_socket"})->can_write(0);
 
   my $req_id = _next_req_id($self);
@@ -116,99 +142,247 @@ sub get_auth_code
 }
 
 #
-# Open a new TCP connection; everything buffered for the old one is dropped
+# Connected and authenticated. Otherwise a connection is opened in the background (not before retry_at after a
+# failure) and the caller goes on without it: a server that is down or frozen never makes the daemon wait.
+# The very first connection is opened at once: the server just sent its first log line, and the daemon needs its map.
 #
-sub _connect
+sub _ready
 {
   my ($self) = @_;
-  my $server_object = $self->{"server_object"};
+  return 1 if $self->{"rcon_socket"} && $self->{"auth"} && !$self->{rcon_err} && !$self->{broken};
+  return 0 if $self->{connecting} || $self->{retry_at} > time() || $self->{destroyed};
+  return $self->_open_now() unless $self->{tried}++;
+  $self->_open_async();
+  return 0;
+}
 
-  if ($self->{"rcon_socket"}) {
-      eval { shutdown($self->{"rcon_socket"}, 2); };
-      eval { $self->{"rcon_socket"}->close(); };
-      $self->{"rcon_socket"} = undef;
-      ::printEvent("RCON", "Closing TCP socket $!",1, "$server_object->{address}:$server_object->{port}");
-  }
-  $self->{rbuf}   = '';
-  $self->{broken} = 0;
-  $self->{inbox}  = {};
-  $self->{nowait} = {};
-  $self->{"auth"} = 0;
+#
+# The first connection, opened while the caller waits (2 s at most, once)
+#
+sub _open_now
+{
+  my ($self) = @_;
+  my $server_object = $self->{"server_object"} or return 0;
+  $self->_close_socket();
+  $self->{attempt_at} = time();
 
-  ::printEvent("RCON", "Attempting TCP socket",1, "$server_object->{address}:$server_object->{port}");
-
-  $self->{"rcon_socket"} = IO::Socket::INET->new(
+  my $sock = IO::Socket::INET->new(
       Proto    => "tcp",
       PeerAddr => $server_object->{address},
       PeerPort => $server_object->{port},
       Timeout  => $TIMEOUT,
   );
+  return $self->_failed("Cannot connect: " . ($! || "timeout")) unless $sock;
+  binmode($sock, ':raw');
+  $sock->autoflush(1);
+  $self->{"rcon_socket"} = $sock;
+  return $self->_failed("Couldn't send the rcon password")
+      if $self->send_rcon($AUTH_PACKET_ID, $SERVERDATA_AUTH, $server_object->{rcon}, 1);
 
-  unless ($self->{"rcon_socket"}) {
-      ::printEvent("RCON", "Cannot setup TCP socket $!",1, "$server_object->{address}:$server_object->{port}");
-      return 0;
+  # Source sends an empty reply before the answer to the password
+  my $deadline = time() + $TIMEOUT;
+  while ((my $remain = $deadline - time()) > 0) {
+      my ($id, $type) = $self->_next_packet($remain);
+      last unless defined $id;
+      next unless $type == $SERVERDATA_AUTH_RESPONSE;
+      return $self->get_auth_code($id) ? $self->_authenticated() : $self->_refused();
   }
-  ::printEvent("RCON", " TCP socket is now open",1, "$server_object->{address}:$server_object->{port}");
-  binmode($self->{"rcon_socket"}, ':raw');
-  $self->{"rcon_socket"}->autoflush(1);
-  return 1;
+  return $self->_failed($self->{broken} ? "Connection closed by the server" : "No answer to the rcon password");
 }
 
 #
-# After a failed connection or password: no new attempt for 10 s, then 20 s, 40 s, then once a minute
-# (a server whose rcon cannot be reached, or refuses the password, costs no wait per command)
+# Open a connection in the background: the event loop connects, sends the password and reads the answer
 #
-sub _retry_later
+sub _open_async
 {
   my ($self) = @_;
+  my $server_object = $self->{"server_object"} or return;
+  $self->_close_socket();
+  $self->{connecting} = 1;
+  $self->{attempt_at} = time();
+
+  Scalar::Util::weaken(my $weak = $self);
+  my $client = $self->{connector} = Mojo::IOLoop::Client->new;
+  $client->on(connect => sub { $weak->_connected($_[1]) if $weak });
+  $client->on(error   => sub { $weak->_failed("Cannot connect: $_[1]") if $weak });
+  $client->connect(address => $server_object->{address}, port => $server_object->{port}, timeout => $TIMEOUT);
+}
+
+sub _connected
+{
+  my ($self, $handle) = @_;
+  my $server_object = $self->{"server_object"} or return $self->_close_socket();
+  delete $self->{connector};
+  binmode($handle, ':raw');
+  $self->{"rcon_socket"} = $handle;
+
+  Scalar::Util::weaken(my $weak = $self);
+  my $reactor = Mojo::IOLoop->singleton->reactor;
+  $self->{auth_timer} = $reactor->timer($TIMEOUT => sub { $weak->_failed("No answer to the rcon password") if $weak });
+  $reactor->io($handle => sub { $weak->_auth_read() if $weak })->watch($handle, 1, 0);
+  $self->_failed("Couldn't send the rcon password")
+      if $self->send_rcon($AUTH_PACKET_ID, $SERVERDATA_AUTH, $server_object->{rcon}, 1);
+}
+
+# The answer to the password, read by the event loop (Source sends an empty reply first)
+sub _auth_read
+{
+  my ($self) = @_;
+  my $sock = $self->{"rcon_socket"} or return;
+
+  my $n = sysread($sock, my $chunk, 65536);
+  unless (defined $n) {
+      return if $!{EAGAIN} || $!{EWOULDBLOCK};
+      return $self->_failed("Socket read error $!");
+  }
+  return $self->_failed("Connection closed by the server") unless $n;
+
+  $self->{rbuf} .= $chunk;
+  while (my ($id, $type, $body) = $self->_take_packet()) {
+      next unless $type == $SERVERDATA_AUTH_RESPONSE;
+      return $self->get_auth_code($id) ? $self->_authenticated() : $self->_refused();
+  }
+  $self->_failed("Invalid answer to the rcon password") if $self->{broken};
+}
+
+sub _authenticated
+{
+  my ($self) = @_;
+  my $sock = $self->{"rcon_socket"};
+  my $reactor = Mojo::IOLoop->singleton->reactor;
+  $reactor->remove(delete $self->{auth_timer}) if $self->{auth_timer};
+  $reactor->remove($sock);
+  $sock->blocking(1);
+  $sock->autoflush(1);
+
+  # From now on the event loop reads the replies to messages, and sees at once a connection closed by the server
+  Scalar::Util::weaken(my $weak = $self);
+  $reactor->io($sock => sub { $weak->_on_readable() if $weak })->watch($sock, 1, 0);
+
+  if ($self->{down_logged}) {
+      ::printEvent("RCON", sprintf("Connected again after %.0f s", time() - $self->{down_since}), 1, $self->{addr});
+  }
+  $self->{connecting}  = 0;
+  $self->{rcon_err}    = 0;
+  $self->{retry_at}    = 0;
+  $self->{retry_wait}  = 0;
+  $self->{down_since}  = 0;
+  $self->{down_logged} = 0;
+
+  # What was given to execute_nowait while the connection was being opened
+  my @queue = @{ $self->{queue} };
+  $self->{queue} = [];
+  my $now = time();
+  for my $q (@queue) {
+      next if $now - $q->[0] > $QUEUE_TTL;
+      last unless $self->_send_nowait($q->[1]);
+  }
+  return 1;
+}
+
+# Replies to messages, read by the event loop as they come
+sub _on_readable
+{
+  my ($self) = @_;
+  $self->_drain_nowait();
+  $self->_lost("Connection closed by the server") if $self->{broken};
+}
+
+#
+# No connection: tried again a second after the start of this attempt (at once after a time-out). The error count
+# grows with the time the server has been down (1, then 2 after 15 s, 3 after 30 s: hlstats.pl takes the players off
+# a server that has been down for 30 s).
+#
+sub _failed
+{
+  my ($self, $why) = @_;
+  $self->_close_socket();
+  my $now = time();
+  $self->{down_since} ||= $now;
+  $self->{rcon_err} = 1 + int(($now - $self->{down_since}) / 15);
+  $self->_log_down($why, "trying again every second");
+  my $delay = ($self->{attempt_at} // 0) + $RETRY_EVERY - $now;
+  $self->_retry_in($delay > 0 ? $delay : 0);
+  return 0;
+}
+
+#
+# A connection that worked stopped answering, or was closed: a new one is opened at once, in the background
+#
+sub _lost
+{
+  my ($self, $why) = @_;
+  $self->_close_socket();
+  $self->{down_since} ||= time();
+  $self->{rcon_err} ||= 1;
+  ::printEvent("RCON", "$why: reconnecting", 3, $self->{addr});
+  $self->{retry_at} = 0;
+  $self->_open_async() unless $self->{destroyed};
+  return 0;
+}
+
+#
+# A refused password is not tried again for 10 s, then 20 s, 40 s, then once a minute: game servers ban an address
+# after a few refused passwords (sv_rcon_minfailures within sv_rcon_minfailuretime). The server is up: its players stay.
+#
+sub _refused
+{
+  my ($self) = @_;
+  $self->_close_socket();
+  $self->{rcon_err} = 1;
   my $wait = ($self->{retry_wait} || 5) * 2;
   $self->{retry_wait} = $wait > 60 ? 60 : $wait;
-  $self->{retry_at}   = time() + $self->{retry_wait};
+  ::printEvent("RCON", "Next attempt in $self->{retry_wait} s", 1, $self->{addr});
+  $self->_retry_in($self->{retry_wait});
+  return 0;
 }
 
-#
-# Connected and authenticated, connecting first when needed (not before retry_at after a failure)
-#
-sub _ready
+# The next attempt is made by the event loop, even when no command needs the server
+sub _retry_in
+{
+  my ($self, $delay) = @_;
+  my $reactor = Mojo::IOLoop->singleton->reactor;
+  $reactor->remove(delete $self->{retry_timer}) if $self->{retry_timer};
+  $self->{retry_at} = time() + $delay;
+  return if $self->{destroyed};
+
+  Scalar::Util::weaken(my $weak = $self);
+  $self->{retry_timer} = $reactor->timer($delay => sub {
+      return unless $weak;
+      delete $weak->{retry_timer};
+      $weak->{retry_at} = 0;
+      $weak->_ready();
+  });
+}
+
+# Once per outage
+sub _log_down
+{
+  my ($self, $why, $next) = @_;
+  return if $self->{down_logged}++;
+  $why =~ s/\s+\z//;
+  ::printEvent("RCON", "$why: $next", 1, $self->{addr});
+}
+
+# Close the connection, or the attempt to open one; everything buffered for it is dropped
+sub _close_socket
 {
   my ($self) = @_;
-  my $server_object = $self->{"server_object"};
-
-  return 1 if $self->{"rcon_socket"} && !$self->{rcon_err} && $self->{"auth"};
-  return 0 if $self->{retry_at} > time();
-
-  if (!$self->{"rcon_socket"} || $self->{rcon_err}) {
-      unless ($self->_connect()) {
-          $self->{rcon_err}++;
-          $self->_retry_later();
-          return 0;
-      }
+  my $reactor = Mojo::IOLoop->singleton->reactor;
+  $reactor->remove(delete $self->{auth_timer}) if $self->{auth_timer};
+  delete $self->{connector};
+  if (my $sock = $self->{"rcon_socket"}) {
+      $reactor->remove($sock) if defined fileno($sock);
+      eval { shutdown($sock, 2); };
+      eval { $sock->close(); };
   }
-
-  unless ($self->{"rcon_socket"}->connected()) {
-      $self->{rcon_err}++;
-      $self->_retry_later();
-      return 0;
-  }
-
-  unless ($self->{"auth"}) {
-      ::printEvent("RCON", "Trying to get rcon access (auth)",1,"$server_object->{address}:$server_object->{port}");
-      if ($self->send_rcon($AUTH_PACKET_ID, $SERVERDATA_AUTH, $server_object->{rcon}, 1)) {
-          ::printEvent("RCON", "Couldn't send password", 1, "$server_object->{address}:$server_object->{port}");
-          $self->_retry_later();
-          return 0;
-      }
-      my ($id, $command) = $self->recieve_rcon($AUTH_PACKET_ID);
-      $self->get_auth_code($id) if $command == $SERVERDATA_AUTH_RESPONSE;
-      unless ($self->{"auth"}) {
-          $self->_retry_later();
-          return 0;
-      }
-  }
-  $self->{rcon_err}   = 0;
-  $self->{retry_at}   = 0;
-  $self->{retry_wait} = 0;
-  return 1;
+  $self->{"rcon_socket"} = undef;
+  $self->{connecting} = 0;
+  $self->{rbuf}   = '';
+  $self->{broken} = 0;
+  $self->{inbox}  = {};
+  $self->{nowait} = {};
+  $self->{"auth"} = 0;
 }
 
 sub sendrecv
@@ -217,35 +391,50 @@ sub sendrecv
 
   return unless $self->_ready();
   $self->_drain_nowait();
-  # Closed by the server since the last command: reconnect once before sending
-  return if $self->{broken} && !$self->_ready();
+  if ($self->{broken}) {
+      $self->_lost("Connection closed by the server");
+      return;
+  }
+  # A server that stopped reading would block the daemon in the write
+  unless (IO::Select->new($self->{"rcon_socket"})->can_write(0)) {
+      $self->_lost("The server stopped reading");
+      return;
+  }
 
   my $req_id;
   if ($splitted_answer // 0) {
       $req_id = $self->send_command_with_sentinel($msg);
-      return unless $req_id && $req_id !~ /^(?:0|1)$/;
+      $req_id = undef if $req_id && $req_id =~ /^(?:0|1)$/;
   } else {
       $req_id = _next_req_id($self);
-      return if $self->send_rcon($req_id, $SERVERDATA_EXECCOMMAND, $msg);
+      $req_id = undef if $self->send_rcon($req_id, $SERVERDATA_EXECCOMMAND, $msg);
+  }
+  unless ($req_id) {
+      $self->_lost("Cannot send to the server") if $self->{broken};
+      return;
   }
 
   my ($id, $command, $response) = $self->recieve_rcon($req_id, $splitted_answer);
+  # No answer: the server is frozen, loading a map or gone. Another connection is opened in the background
+  $self->_lost("No answer to $msg") if $self->{rcon_err} || $self->{broken};
   return $response;
 }
 
 sub destroy {
     my ($self) = @_;
-    if ($self->{rcon_socket}) {
-        eval { shutdown($self->{rcon_socket}, 2); };
-        eval { $self->{rcon_socket}->close(); };
-        $self->{rcon_socket} = undef;
-    }
-    $self->{auth}   = 0;
-    $self->{rbuf}   = '';
-    $self->{broken} = 0;
-    $self->{nowait} = {};
-    $self->{inbox}  = {};
+    $self->{destroyed} = 1;
+    $self->_close_socket();
+    my $reactor = Mojo::IOLoop->singleton->reactor;
+    $reactor->remove(delete $self->{retry_timer}) if $self->{retry_timer};
+    $self->{queue} = [];
     return 1;
+}
+
+# Also when the server object is deleted: no watcher may stay on a closed socket
+sub DESTROY
+{
+    my ($self) = @_;
+    $self->destroy() unless ${^GLOBAL_PHASE} eq 'DESTRUCT';
 }
 
 #

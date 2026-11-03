@@ -56,16 +56,39 @@ sub new
     return $self;
 }
 
+#
+# Players of this game, counted once a minute at most. Each server of the game asks at each of its flushes (every
+# 20 s), each !rank asks too, and each count reads every player of the game: counted every time, it was the daemon's
+# biggest cost with many servers (100 busy servers and 240,000 players: close to 40% of its time).
+#
 sub getTotalPlayers
 {
     my ($self) = @_;
+    return $self->countPlayers("ranked", "hideranking = 0");
+}
 
-    my $query = "SELECT count(*) as players FROM hlstats_Players WHERE game=? AND hideranking = 0 AND lastAddress <> ''";
-    my $resultTotalPlayers = ::exec_cache("get_game_total_players", $query, $self->{game});
-    my ($totalplayers) = $resultTotalPlayers->fetchrow_array;
-    $resultTotalPlayers->finish;
+# The players the servers track (all but the hidden ones): hlstats_Servers.players
+sub getTrackedPlayers
+{
+    my ($self) = @_;
+    return $self->countPlayers("tracked", "hideranking <> 1");
+}
 
-    return $totalplayers;
+sub countPlayers
+{
+    my ($self, $kind, $where) = @_;
+    my $counted = $self->{player_count}{$kind};
+    return $counted->[1] if $counted && time() - $counted->[0] < 60;
+
+    # The database does not answer: the last count, until it does
+    my $result = ::exec_cache("game_players_$kind",
+        "SELECT count(*) as players FROM hlstats_Players WHERE game=? AND $where AND lastAddress <> ''", $self->{game})
+        or return $counted ? $counted->[1] : 0;
+    my ($players) = $result->fetchrow_array;
+    $result->finish;
+
+    $self->{player_count}{$kind} = [time(), $players // 0];
+    return $players // 0;
 }
 
 1;

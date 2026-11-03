@@ -383,6 +383,10 @@ sub init_rcon
     }
 }
 
+#
+# Run an rcon command. Called in void context (the answer is not used: messages, kicks, bans), the command is
+# sent without waiting for the game server's reply, so the daemon goes on with the next log line.
+#
 sub dorcon
 {
     my ($self, $command)      = @_;
@@ -1027,12 +1031,10 @@ sub flushDB
     ($self->{total_kills}, $self->{total_headshots}, $self->{total_suicides},$self->{total_rounds},$self->{total_shots},$self->{total_hits},$self->{server_map}) = $result->fetchrow_array();
     $result->finish;
 
-    my $result2 = ::exec_cache(
-        "get_player_count",
-        "SELECT count(*) as players FROM hlstats_Players WHERE game=? AND hideranking <> 1 AND lastAddress <> ''",
-        $self->{game});
-    $self->{players} = $result2->fetchrow_array();
-    $result2->finish;
+    # The same for every server of the game: counted once a minute for all of them (HLstats_Game.pm)
+    if (my $game = $::g_games{$self->{game}}) {
+        $self->{players} = $game->getTrackedPlayers();
+    }
 
     # Update player details
     my $query = "

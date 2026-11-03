@@ -74,7 +74,7 @@ our $g_version;
 our ($g_mailto, $g_mailpath, $g_mode, $g_deletedays, $g_requiremap);
 our ($g_debug, $g_nodebug, $g_rcon, $g_rcon_ignoreself, $g_rcon_record);
 our ($g_stdin, $g_server_ip, $g_server_port, $g_timestamp, $g_cpanelhack);
-our ($g_event_queue_size, $g_dns_resolveip, $g_dns_timeout);
+our ($g_event_queue_size);
 our ($g_skill_maxchange, $g_skill_minchange, $g_skill_ratio_cap);
 our ($g_geoip_binary, $g_player_minkills, $g_onlyconfig_servers, $g_track_stats_trend);
 our ($g_global_banning, $g_log_chat, $g_log_chat_admins, $g_global_chat);
@@ -3292,8 +3292,6 @@ $g_server_port = 27015;
 $g_timestamp = 0;
 $g_cpanelhack = 0;
 $g_event_queue_size = 50;
-$g_dns_resolveip = 1;
-$g_dns_timeout = 5;
 $g_skill_maxchange = 100;
 $g_skill_minchange = 2;
 $g_skill_ratio_cap = 0;
@@ -3353,12 +3351,8 @@ a MySQL database.
                                     password on the command line is insecure.
                                     Use the configuration file instead.)
       --db-username=USERNAME      database username
-      --dns-resolveip             resolve player IP addresses to hostnames
-                                    (requires working DNS)
    -c,--configfile                Specific configfile to use, settings in this file can now
                                     be overidden with commandline settings.
-      --nodns-resolveip           disables above
-      --dns-timeout=SEC           timeout DNS queries after SEC seconds  [$g_dns_timeout]
   -i, --ip=IP                     set IP address to listen on for UDP log data
   -p, --port=PORT                 set port to listen on for UDP log data  [$s_port]
   -r, --rcon                      enables rcon command exec support (the default)
@@ -3420,8 +3414,6 @@ if ($opt_configfile && -r $opt_configfile) {
         "Mode",                      "g_mode",
         "DeleteDays",                "g_deletedays",
         "UseTimestamp",              "g_timestamp",
-        "DNSResolveIP",              "g_dns_resolveip",
-        "DNSTimeout",                "g_dns_timeout",
         "RconIgnoreSelf",            "g_rcon_ignoreself",
         "Rcon",                      "g_rcon",
         "RconRecord",                "g_rcon_record",
@@ -3463,8 +3455,9 @@ GetOptions(
     "db-name=s"         => \$copts{db_name},
     "db-password=s"     => \$copts{db_pass},
     "db-username=s"     => \$copts{db_user},
-    "dns-resolveip!"    => \$copts{g_dns_resolveip},
-    "dns-timeout=i"     => \$copts{g_dns_timeout},
+    # No longer used (the daemon does not look up host names), still accepted: an old start command keeps working
+    "dns-resolveip!"    => \my $no_dns_resolveip,
+    "dns-timeout=i"     => \my $no_dns_timeout,
     "ip|i=s"            => \$copts{s_ip},
     "port|p=i"          => \$copts{s_port},
     "rcon!"             => \$copts{g_rcon},
@@ -3656,18 +3649,18 @@ my $udp_drain_scheduled = 0;
 sub handle_udp {
     $udp_drain_scheduled = 0;
 
-    my $n = 0;
-    my $max_per_tick = 5000; 
-
-    while (@UDPQ && $n++ < $max_per_tick) {
+    # Lines until the queue is empty, or for 50 ms (see handle_http)
+    my $until = time() + 0.05;
+    while (@UDPQ) {
         my ($addr, $data) = @{ shift @UDPQ };
         local $s_addr = $addr;
         handleIncoming("UDP", $data);
+        last if time() >= $until;
     }
 
     if (@UDPQ) {
         $udp_drain_scheduled = 1;
-        Mojo::IOLoop->next_tick(\&handle_udp);
+        Mojo::IOLoop->timer(0 => \&handle_udp);
     }
 }
 
@@ -3677,18 +3670,20 @@ my $http_drain_scheduled = 0;
 sub handle_http {
     $http_drain_scheduled = 0;
 
-    my $n = 0;
-    my $max_per_tick = 5000;
-
-    while (@HTTPQ && $n++ < $max_per_tick) {
+    # Lines until the queue is empty, or for 50 ms, then the rest from a timer: the loop reads the network and
+    # answers the HTTP requests in between. Rescheduled by next_tick it did neither until the whole queue was
+    # handled, so a backlog kept the plugin's requests waiting past their timeout.
+    my $until = time() + 0.05;
+    while (@HTTPQ) {
         my ($addr, $data) = @{ shift @HTTPQ };
         local $s_addr = $addr;
         handleIncoming("HTTP", $data);
+        last if time() >= $until;
     }
 
     if (@HTTPQ) {
         $http_drain_scheduled = 1;
-        Mojo::IOLoop->next_tick(\&handle_http);
+        Mojo::IOLoop->timer(0 => \&handle_http);
     }
 }
 
