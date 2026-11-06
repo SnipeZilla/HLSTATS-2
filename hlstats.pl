@@ -3746,8 +3746,11 @@ if ($g_stdin == 0) {
         });
 
         # Prevent a single bad request from killing the I/O watcher.
-        Mojo::IOLoop->singleton->reactor->on(error => sub {
+        Mojo::IOLoop->singleton->reactor->unsubscribe('error')->on(error => sub {
             my ($reactor, $err) = @_;
+            if ($err =~ /^I\/O watcher failed/s) {
+                return; # bad header
+            }
             printEvent("HTTP", "Reactor error (ignored): $err", 1);
         });
 

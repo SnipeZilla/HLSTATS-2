@@ -1127,10 +1127,47 @@ sub flush_player_count
     ::exec_cache("flush_plyr_cnt", "UPDATE hlstats_Servers SET act_players=? WHERE serverId=?", $self->{numplayers}, $self->{id});
 }
 
+# The IP to geolocate the server
+# The address of the logs may be private, behind NAT, Pterodactyl, LinuxGSM...), else the address.
+#
+sub geo_ip {
+    my ($self) = @_;
+
+    my $public = $self->{publicaddress} // '';
+    $public =~ s/^\s+|\s+$//g;
+    if ($public ne '') {
+        my $host = $public;
+        $host =~ s/:\d*$//;                  # ip:port, host:port
+        my $is_ip   = $host =~ /^\d{1,3}(?:\.\d{1,3}){3}$/;
+        my $is_host = $host =~ /^(?:[A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z0-9-]*$/;   # cs2.myserver.com
+        # A name or a single word ("SnipeZilla", "localhost"): no lookup, it can take seconds
+        return $self->{address} unless $is_ip || $is_host;
+        my $ip = $host;
+        if ($is_host) {
+            my $packed = inet_aton($host);    # host name: DNS
+            $ip = $packed ? inet_ntoa($packed) : '';
+            ::printEvent("SERVER", "Public address \"$public\" does not resolve, geolocating by $self->{address}", 1, "$self->{address}:$self->{port}")
+                unless $packed;
+        }
+        return $ip if ($ip ne '' && !is_private_ip($ip));
+    }
+    return $self->{address};
+}
+
+sub is_private_ip {
+    my ($ip) = @_;
+    return 1 if $ip =~ /^(?:10|127|0)\./;
+    return 1 if $ip =~ /^192\.168\./;
+    return 1 if $ip =~ /^169\.254\./;
+    return 1 if $ip =~ /^172\.(?:1[6-9]|2\d|3[01])\./;
+    return 1 if $ip =~ /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./;   # CGNAT
+    return 0;
+}
+
 sub update_server_loc {
     my ($self)      = @_;
     my $serverid    = $self->{id};
-    my $server_ip   = $self->{address};
+    my $server_ip   = $self->geo_ip();
 
     my ($servcity, $servcountry, $servlat, $servlng);
 
@@ -1188,8 +1225,8 @@ sub update_server_loc {
         );
     return unless ($res2->rows > 0);
 
-    ($servcity,$servcountry,$servlat,$servlng) = $result->fetchrow_array;
-    $res->finish;
+    ($servcity,$servcountry,$servlat,$servlng) = $res2->fetchrow_array;
+    $res2->finish;
 
     # Use undef for NULLs
     ::exec_now(
