@@ -924,6 +924,8 @@ sub addServerToDB
                 SELECT ?, `parameter`, `value`
                 FROM `hlstats_Games_Defaults` WHERE `code` = ?
                 ON DUPLICATE KEY UPDATE `value` = VALUES(`value`);", $last_id, $game);  
+    # readDatabaseConfig() drops every server object: their stats are saved first, as for a reload
+    flushAll();
     readDatabaseConfig();
 
     return 1;

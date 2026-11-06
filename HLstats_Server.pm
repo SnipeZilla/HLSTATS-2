@@ -1053,7 +1053,7 @@ sub flushDB
             ts_wins=ts_wins + ?,
             act_players=?,
             max_players=?,
-            act_map=?,
+            act_map=COALESCE(NULLIF(?, ''), act_map),
             map_rounds=?,
             map_ct_wins=?,
             map_ts_wins=?,
