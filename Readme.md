@@ -1,163 +1,123 @@
-# HLstatsZ — Real-time stats daemon for GoldSrc, Source, and Source 2 (CS2)
+# HLstatsZ
 
-HLstatsZ is the only active HLstatsX fork with ***native*** **Counter-Strike 2 support** via Valve's HTTP log transport. It stays fully backward-compatible with all UDP-based Source and GoldSrc games.
- 
-> **Why Perl + Mojolicious?**  
-> Mojolicious provides the async engine: actively maintained, truly non‑blocking, lightweight, and built with a clean, modern API. It handles timers, events, sockets, and async I/O without blocking — exactly what an event‑driven daemon needs.  
-> Perl provides the regex horsepower: this daemon performs continuous, high‑volume, regex‑heavy log parsing, which is precisely what Perl’s mature text‑processing engine excels at.  
-> Together, they deliver a fast, stable, non‑blocking daemon designed for long‑running, high‑throughput log processing at scale.  
----
+**Real-time player stats and rankings for GoldSrc, Source and Counter-Strike 2 servers.**
 
-## What makes HLstatsZ different
+HLstatsZ is the HLstatsX you know, kept alive and brought up to date. Your players get their rank, their points
+after each kill, awards, and a website with their whole history. You get one small program that takes the logs of
+all your game servers and never needs watching.
 
-- **Hardened code and config loading** — Consistent use of `use strict` ensures no hidden bugs; database settings are applied through symbolic references rather than `eval`; raw log bytes are always decoded to prevent any compromised DB value from injecting code into the running daemon.
-- **Dual-protocol listener on one port** — Mojo::IOLoop watches a raw UDP socket and a Mojo::Server::Daemon (HTTP) simultaneously. GoldSrc/Source logs arrive over UDP; CS2 logs arrive over HTTP. Both feed the same parser.
-- **Non-blocking by design** — UDP and HTTP each have their own queue (`@UDPQ` / `@HTTPQ`) drained via `Mojo::IOLoop->next_tick()`. A burst of CS2 traffic never starves UDP servers or vice versa, and neither blocks the main loop.
-- **Periodic tasks stay low-priority** — cleanup, stats snapshots, and DB flushes run on `Mojo::IOLoop->recurring()` timers, always yielding to incoming log traffic.
-- **Buffered batch INSERTs** — events queue up and flush in bulk (configurable size, default 50), reducing InnoDB write pressure at high log rates.
-- **CS2 userid quirk handling** — CS2 initially assigns every connecting player `userid=0`, then reassigns the real userid. The daemon tracks and migrates player keys transparently.
-- **Automatic socket health-check** — detects stale connections and reconnects without restarting.
-- **Built-in daily cronjob** — awards and bans run automatically; no external cron needed.
-- **MariaDB or MySQL** — InnoDB-optimised queries, fastest collation (schema ≥ 84).
-- **GeoIP2** — optional binary GeoIP2-City lookup for player location.
-- **Cross-platform** — Linux and Windows (Strawberry Perl).
+It is the only active HLstatsX fork with ***native*** **Counter-Strike 2 support**, through Valve's HTTP log
+transport, and it still runs every GoldSrc and Source game that HLstatsX:CE did.
+
+| | |
+| --- | --- |
+| **[INSTALL.md](INSTALL.md)** | Install it on Windows or Linux, step by step, with every command to copy and paste. |
+| **[GUIDE.md](GUIDE.md)** | The settings worth knowing: add a server, bans, rankings, the profiler. |
+| **[HLstatsZ web](https://github.com/SnipeZilla/hlstatsz-web)** | The website that shows the stats, with its installer for the database. |
+| **[HLstatsZ Classics](https://github.com/SnipeZilla/HLstatsZ-Classics)** | The CS2 plugin (CounterStrikeSharp), with SourceBans. |
 
 ---
 
-## Requirements
+## Why people stay with it
 
-**Perl modules:**
-- [Mojolicious](https://metacpan.org/pod/Mojolicious)
-- [GeoIP2](https://metacpan.org/pod/GeoIP2) + GeoIP2::Database::Reader *(optional)*
-- [DBD::MariaDB](https://metacpan.org/pod/DBD::MariaDB) *(optional, or DBD::mysql)*
+- **Players like it.** Points after a kill, `rank` and `top10` in the chat, awards every day, a rank to defend:
+  it gives people a reason to come back to your server.
+- **Already on HLstatsX:CE? Keep everything.** HLstatsZ uses your database as it is: same players, same history,
+  same plugins on the game servers.
+- **One daemon for all your servers.** CS 1.6, TF2 and CS2 side by side, on one port, in one process.
+- **Set it up and forget it.** It starts with the machine, starts again by itself if it stops, reconnects by itself
+  when a connection goes stale, and runs the daily awards and bans without cron.
+- **Windows and Linux**, with MariaDB or MySQL.
 
-**Install Mojolicious:**
-```sh
-# Linux
-curl -L https://cpanmin.us | perl - -M https://cpan.metacpan.org -n Mojolicious
+## Light, and you can check
 
-# Windows (Strawberry Perl)
-cpan install Mojolicious
-```
+Stats daemons have a reputation of being heavy. This one is built to stay out of the way:
 
-**Windows Perl:** [Strawberry Perl 5.38.0.1 64-bit](https://strawberryperl.com/release-notes/5.38.0.1-64bit.html) (must be compiled with MySQL support)
+- **It never waits.** The daemon is event-driven (Mojolicious): logs, timers and RCON answers are handled as they
+  come, and a busy server never holds back the others.
+- **It writes in batches.** Events are queued and inserted together, so the database does a few big writes
+  and not thousands of small ones.
+- **Housekeeping comes last.** Cleanup, snapshots and saves run on timers, after the incoming logs.
+- **It doesn't touch your game servers.** It runs next to the database. A game server only sends its log lines,
+  as it does for any log address.
 
----
+Don't take our word for it: **HLstatsZ has a profiler built in.** Set `Profile 1` in `hlstats.conf`, restart, let it
+run while your servers are busy, and drop the log on the viewer page that comes with it. It tells you, for *your*
+machine:
 
-## Installation & Setup
+- how busy the daemon is at your peak hour, in % of its time;
+- how many log lines a second it can take before it reaches its limit;
+- **how many game servers it can handle with ease**, and where its limit is;
+- what it is waiting for, when it waits: the database, RCON, a slow query, the processor.
 
-### Database
-Use your existing db or import the schema:
-```sh
-mysql -u root -p hlstats < sql/install.sql
-```
-
-### Firewall Port
-```
-allow inbound traffic on TCP 27500 and UDP 27500
-```
-### Daemon configuration
-Edit `hlstats.conf`:
-```ini
-DBHost     "localhost"
-DBName     "hlstats"
-DBUsername "root"
-DBPassword "yourpassword"
-Port       "27500"
-```
-
-Built-in daily cronjob (optional):
-```ini
-PathPerl   "/usr/bin/perl"
-PathAwards "/usr/bin/hlstats/hlstats-awards.pl"
-PathBans   "/usr/bin/hlstats/Importbans/importbans.pl"
-```
-
-### Game server configuration
-
-**GoldSrc (Half-Life 1)**
-<br>Recommended plugin: [hlstats_cs.amxx](https://github.com/SnipeZilla/HLSTATS-2/blob/main/plugins/amxmodx/plugins/hlstats_cs.amxx)
-
-```
-rcon_password "PaSsWoRd"
-log on
-logaddress_delall
-logaddress_add 64.74.97.164 27500
-```
-
-**Source (CS:GO, TF2, L4D2 …)**
-<br>Recommended plugin: [hlstatsx.smx](https://github.com/SnipeZilla/HLSTATS-2/blob/main/plugins/sourcemod/plugins/hlstatsx.smx)
-```
-rcon_password "PaSsWoRd"
-log on
-logaddress_delall
-logaddress_add "64.74.97.164:27500"
-```
-
-**Source 2 — Counter-Strike 2**
-<br>Recommended plugin: [HLstatsZ CS2 plugin](https://github.com/SnipeZilla/CS2-HLstatsX-Plugin) or [HLstatsZ Classics plugin](https://github.com/SnipeZilla/HLstatsZ-Classics)
-
-```
-rcon_password "PaSsWoRd"
-log on
-logaddress_delall_http
-logaddress_add_http "http://64.74.97.164:27500"
-sv_visiblemaxplayers 32
-```
-
-Add `-usercon` to your server launch options.
-
-Optional secondary address for testing against a different daemon:
-```
-logaddress_add_http_delayed 0.0 "http://64.74.97.164:27501"
-```
+The viewer is one HTML page that works offline: your log is read in your browser and goes nowhere. The log is
+limited to about 10 MB, so it is safe to leave on for a day, even on a small VPS.
+How to use it: [Check the load](GUIDE.md#check-the-load-the-profiler) in GUIDE.md.
 
 ---
 
-## Running
+## What's inside
 
-```sh
-# Linux
-./run_hlstats
+<details>
+<summary>For the curious: what changed since HLstatsX:CE</summary>
 
-# Windows
-run-hlstats.ps1
-```
+- **Two protocols, one port.** GoldSrc and Source logs arrive over UDP, CS2 logs over HTTP. Both are listened to
+  on the same port and feed the same parser.
+- **Non-blocking by design.** UDP and HTTP each have their own queue. A burst of CS2 traffic never starves the
+  UDP servers, or the other way round, and neither blocks the main loop.
+- **Buffered batch INSERTs.** Events queue up and flush in bulk, which keeps the write pressure on InnoDB low at
+  high log rates.
+- **Hardened code and config loading.** `use strict` everywhere, no `eval` to apply the settings read from the
+  database, and raw log bytes are always decoded: a bad value in the database can't inject code in the daemon.
+- **CS2 userid handling.** CS2 gives every connecting player `userid=0` first, then the real one. The daemon
+  follows the player through the change.
+- **Socket health-check.** A stale connection is detected and opened again, without a restart.
+- **Built-in daily job.** Awards and bans run once a day from the daemon itself.
+- **MariaDB or MySQL**, with InnoDB-optimised queries.
+- **GeoIP2.** Optional GeoIP2-City lookup, for the players' location and the map on the website.
+- **Profiler.** Off by default, one line in `hlstats.conf` to turn on.
 
----
+</details>
 
-## Web frontend
-
-Any HLstats‑compatible frontend will run — but most legacy ones are outdated, unmaintained or poorly patched and look 15+ years old.
-
-The good news is that fully modern, actively maintained frontends are available today — and they drop in with the same database structure you’re already using.
-
-**Recommended modern frontends**  
- - [HLstatsZ web](https://github.com/SnipeZilla/hlstatsz-web)  
- - [HLstatsX CE - Laravel Rebase](https://github.com/Royal-Multi-Gamers/hlstatsx-community-edition-laravel)  
-
- Both are modern, responsive, and drop‑in compatible.  
- And more are currently in development!
+> **Why Perl + Mojolicious?**
+> A stats daemon reads log lines all day, and matching text is what Perl does best. Mojolicious brings the modern
+> part: an actively maintained, non-blocking event loop for the sockets, the timers and the HTTP listener CS2 needs.
+> Together: a small, stable daemon made to run for months.
 
 ---
 
 ## FAQ
 
-**Where should I run HLstatsZ?**  
-On the machine that hosts your SQL database — not on your game server.
+**Where should I run HLstatsZ?**
+On the machine that hosts your database, not on a game server. HLstatsZ works with the database all the time, so
+it belongs next to it, and your game servers keep their CPU for the game.
 
-**Why don't daily awards run?**  
-Set `PathPerl` and `PathAwards` / `PathBans` in `hlstats.conf`. The built-in cronjob fires automatically once per day.
+**How many game servers can one daemon take?**
+All of yours go in a single process, and communities run it with many. The exact number depends on your machine
+and on how busy your servers are, so measure it: the [profiler](GUIDE.md#check-the-load-the-profiler) gives you
+the figure.
 
-**How do I ignore Warmup or End-of-Round?**  
-In the `Game Settings` > `Configure` > entry set `BonusRoundIgnore = 1`.
+**I run HLstatsX:CE. Can I switch?**
+Yes. Keep your database, point the daemon at it, and your game servers keep sending their logs to the same port.
+For the website, [HLstatsZ web](https://github.com/SnipeZilla/hlstatsz-web) brings an old database up to date, or
+keep the frontend you have.
 
-**Does it support multiple servers?**  
-Yes. Add each server to the database; the daemon handles all of them in a single process.  
-The clever architecture allows for virtually unlimited servers from just one daemon!
+**Why don't the daily awards run?**
+Set `PathPerl` and `PathAwards` (and `PathBans` for the bans) in `hlstats.conf`. The daemon runs them once a day
+by itself.
 
-**Who's using it?**  
-HLstatsZ has already been widely adopted by many hosting companies, internet cafes, and various gaming communities around the world.
+**Who's using it?**
+Hosting companies, internet cafés and gaming communities around the world.
+
+---
+
+## Also from SnipeZilla
+
+**[SZM, SnipeZilla Server Manager 2](https://github.com/SnipeZilla/szm)**: the game servers themselves, managed
+from a web page. It installs them, updates them when Steam has a new version, and starts them again after a
+crash. One file to run, on Windows, and on Linux too: no PHP, web server or database to install. It also installs
+SourceMod, AMX Mod X and CounterStrikeSharp, which the HLstatsZ plugins need. A good match: Szm keeps the servers
+up, HLstatsZ keeps the score.
 
 ---
 
@@ -176,5 +136,7 @@ HLstats (Simon Garner)
 Based on HLstatsX:CE 1.6.19  
 Maintained and modernized by [SnipeZilla](https://github.com/SnipeZilla)  
 Validation and help by [ghost-](https://github.com/ghostt187)
+
+Help and news: [snipezilla.com](https://snipezilla.com)
 
 Licensed under the GNU General Public License v2 or later.

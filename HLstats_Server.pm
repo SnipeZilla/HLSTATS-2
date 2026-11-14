@@ -16,6 +16,9 @@ use POSIX;
 use IO::Socket;
 use Socket;
 use Encode qw(decode);
+use Scalar::Util ();
+use Mojo::IOLoop;
+use Mojo::Promise;
 
 do "$::opt_libdir/HLstats_GameConstants.plib";
 
@@ -41,7 +44,7 @@ sub new
     $self->{game_engine}    = $gameengine;
 
     $self->{rcon_obj}       = undef;
-    $self->{name}           = ($::db_driver eq 'mysql') ? $server_name : decode("UTF-8", $server_name);
+    $self->{name}           = ::utf8_text($server_name);
     $self->{auto_ban}       = 0;
     $self->{contact}        = "";
     $self->{hlstats_url}    = "";
@@ -168,6 +171,12 @@ sub new
     $self->{next_plyr_flush}               = 0;
     $self->{needsupdate}                   = 0;
     $self->{do_stats}                      = 0;
+
+    $self->{visible_max}                   = undef;    # sv_visiblemaxplayers of the game server, when it was asked
+    $self->{visible_max_at}                = 0;
+    $self->{act_players_db}                = undef;    # the number of players last written by flush_player_count
+    $self->{holding}                       = 0;        # the first log lines wait for the map (hold_lines)
+    $self->{held}                          = [];
 
     $self->set_play_game($realgame);
 
@@ -463,7 +472,21 @@ sub rcon_getaddress
     {
         ::printEvent("Rcon", "error: No Object available",3,"$self->{address}:$self->{port}");
     }
-    return $result;
+    # getPlayer gives 0 for a player who is not in the status answer (gone already, or no answer): no address then
+    return ref($result) eq 'HASH' ? $result : undef;
+}
+
+#
+# rcon_getaddress without waiting for the answer: $cb->($player) is called with the player in the game server's
+# answer to "status" (undef: not in it, or no answer). Returns 0 when the game server cannot be asked that way: the
+# caller asks with rcon_getaddress().
+#
+sub rcon_getaddress_later
+{
+    my ($self, $uniqueid, $slot_name, $cb) = @_;
+    my $rcon_obj = $self->{rcon_obj};
+    return 0 unless Scalar::Util::blessed($rcon_obj) && $::g_rcon == 1 && $self->{rcon} ne "" && $rcon_obj->can('getPlayer_later');
+    return $rcon_obj->getPlayer_later($uniqueid, $slot_name, $cb);
 }
 
 sub rcon_getStatus
@@ -477,14 +500,157 @@ sub rcon_getStatus
     
     if (($rcon_obj) && ($::g_rcon == 1) && ($self->{rcon})) {
         ($servhostname, $map_result, $max_player_result, $difficulty) = $rcon_obj->getServerData();
-        ($visible_maxplayers) = $rcon_obj->getVisiblePlayers();
-        if ( ($visible_maxplayers != -1) && ( ($visible_maxplayers < $max_player_result) || $max_player_result == 0) ) {
-            $max_player_result = $visible_maxplayers;
-        }
+        $max_player_result = visible_max($max_player_result, $self->visible_maxplayers());
     } else {
         ::printEvent("Rcon", "error: No Object available",3,"$self->{address}:$self->{port}");
     }
     return ($map_result, $max_player_result, $servhostname, $difficulty);
+}
+
+# The player slots to show: sv_visiblemaxplayers when it is set, and lower than the maximum of the game server
+sub visible_max
+{
+    my ($max_players, $visible) = @_;
+    return $visible if ($visible != -1) && (($visible < $max_players) || $max_players == 0);
+    return $max_players;
+}
+
+#
+# sv_visiblemaxplayers of the game server (-1: not set, or not known). It hardly ever changes: the game server is
+# asked every 10 minutes at most, not with every status.
+#
+sub visible_maxplayers
+{
+    my ($self) = @_;
+    my $now = time();
+    my $age = $now - $self->{visible_max_at};
+    if (!defined $self->{visible_max} || $age >= 600 || $age < 0) {
+        my ($visible, $answered) = $self->{rcon_obj}->getVisiblePlayers();
+        return $visible unless $answered;    # no answer (or HL1): asked again the next time
+        $self->{visible_max}    = $visible;
+        $self->{visible_max_at} = $now;
+    }
+    return $self->{visible_max};
+}
+
+#
+# rcon_getStatus without waiting for the answer: set_status() gets it when it comes. The questions are promises
+# (TRcon::ask): "status", with "sv_visiblemaxplayers" when it was asked more than 10 minutes ago, or never, and
+# "z_difficulty" for Left 4 Dead. Returns 0 when the game server cannot be asked that way (no connection and none
+# being opened): the caller asks with rcon_getStatus().
+#
+sub rcon_getStatus_later
+{
+    my ($self) = @_;
+    my $rcon_obj = $self->{rcon_obj};
+    return 0 unless Scalar::Util::blessed($rcon_obj) && $::g_rcon == 1 && $self->{rcon} && $rcon_obj->can('ask');
+    return 0 unless $rcon_obj->can_ask();
+
+    Scalar::Util::weaken(my $weak = $self);
+    my @asked = ($self->{last_check}, $self->{map});
+    my $addr  = "$self->{address}:$self->{port}";
+
+    ::printEvent("RCON", "status", 3, $addr);
+    my @questions = ($rcon_obj->ask("status"));
+
+    # sv_visiblemaxplayers hardly ever changes: asked every 10 minutes at most
+    my $age = time() - $self->{visible_max_at};
+    my $ask_visible = !defined $self->{visible_max} || $age >= 600 || $age < 0;
+    $self->{visible_max_at} = time() if $ask_visible;
+    push @questions, $ask_visible ? $rcon_obj->ask("sv_visiblemaxplayers") : Mojo::Promise->resolve(undef);
+
+    my $l4d = $self->{play_game} == L4D();
+    push @questions, $l4d ? $rcon_obj->ask("z_difficulty") : Mojo::Promise->resolve(undef);
+
+    Mojo::Promise->all(@questions)->then(sub {
+        my ($status, $visible, $zdifficulty) = map { $_->[0] } @_;
+        my $rcon = $weak && $weak->{rcon_obj} or return;
+        $weak->{visible_max} = $rcon->visible_of($visible) if defined $visible;
+
+        # Not when the log told of a map change meanwhile: it is newer than this answer
+        if ($status && $weak->{last_check} == $asked[0] && $weak->{map} eq $asked[1]) {
+            my ($servhostname, $map, $max_players) = $rcon->server_data_of($status);
+            my $difficulty = defined $zdifficulty ? $rcon->difficulty_of($zdifficulty) : 0;
+            $weak->set_status($map, visible_max($max_players, $weak->{visible_max} // -1), $servhostname, $difficulty);
+        }
+    })->catch(sub {
+        my $why = $_[0] // '';
+        $why =~ s/\s+\z//;
+        ::printEvent("RCON", "Error while handling the status: $why", 1, $addr);
+    })->finally(sub {
+        # The first log lines of the server waited for this (hold_lines)
+        $weak->release_lines() if $weak;
+    });
+    return 1;
+}
+
+#
+# The first log lines of a game server wait for its map: it is asked without waiting (rcon_getStatus_later), and the
+# lines given to hold_line() meanwhile are handled when the answer comes, in the order they came. 5 s at most (the
+# connection, then the answer); nothing waits when the map is known, or when the server cannot be asked.
+#
+sub hold_lines
+{
+    my ($self) = @_;
+    return 0 if $::g_stdin || $self->{holding} || $self->{map} ne "";
+
+    $self->{last_check} = time();
+    $self->{holding}    = 1;
+    $self->{held}       = [];
+    unless ($self->rcon_getStatus_later()) {
+        $self->{holding} = 0;
+        return 0;
+    }
+    Scalar::Util::weaken(my $weak = $self);
+    $self->{hold_timer} = Mojo::IOLoop->timer(5 => sub { $weak->release_lines() if $weak });
+    return 1;
+}
+
+# A log line that came while the map is waited for: [source, address, line]
+sub hold_line
+{
+    my ($self, @line) = @_;
+    push @{ $self->{held} }, [@line] if @{ $self->{held} } < 20000;
+}
+
+sub release_lines
+{
+    my ($self) = @_;
+    return unless $self->{holding};
+    $self->{holding} = 0;
+    Mojo::IOLoop->remove(delete $self->{hold_timer}) if $self->{hold_timer};
+    my $held = $self->{held};
+    $self->{held} = [];
+    ::replayLine(@$_) for @$held;
+}
+
+#
+# rcon_getplayers without waiting for the answer: $cb->(%players) is called when it comes. Returns 0 when the game
+# server cannot be asked that way (HL1, no connection yet): the caller asks with rcon_getplayers().
+#
+sub rcon_getplayers_later
+{
+    my ($self, $cb) = @_;
+    my $rcon_obj = $self->{rcon_obj};
+    return 0 unless Scalar::Util::blessed($rcon_obj) && $::g_rcon == 1 && $self->{rcon} ne "" && $rcon_obj->can('getPlayers_later');
+    return $rcon_obj->getPlayers_later($cb);
+}
+
+#
+# Run an rcon command without waiting for its answer: $cb->($answer) is called when it comes ($cb->(undef) when the
+# game server gives none). Returns 0 when the command cannot be sent that way: the caller runs it with dorcon().
+#
+sub dorcon_later
+{
+    my ($self, $command, $cb) = @_;
+    my $rcon_obj = $self->{rcon_obj};
+    return 0 unless Scalar::Util::blessed($rcon_obj) && $::g_rcon == 1 && $self->{rcon} ne "" && $rcon_obj->can('execute_later');
+
+    # replace ; to avoid executing multiple rcon commands.
+    $command =~ s/;//g;
+    return 0 unless $rcon_obj->execute_later($command, $cb);
+    ::printEvent("RCON", $command, 3,"$self->{address}:$self->{port}");
+    return 1;
 }
 
 sub rcon_getplayers
@@ -504,17 +670,31 @@ sub rcon_getplayers
 sub track_server_load {
     my ($self) = @_;
 
-    my $new_timestamp = time();
+    return unless $self->{track_server_load};   # the server's TrackServerLoad (a property of the same name)
+
     my $command = $self->{play_game} == CS2() ? "status_json" : "stats";
+    # What is saved with the answer, as it is now: the answer may come later
+    my @now = (time(), $self->{num_players_load}, $self->{minplayers}, $self->{maxplayers}, $self->{map});
+
+    # Without waiting for the answer where that can be done
+    Scalar::Util::weaken(my $weak = $self);
+    return if $self->dorcon_later($command, sub { $weak->save_server_load($_[0], @now) if $weak && defined $_[0] });
+
     my $string = eval { $self->dorcon($command); };
     return if !defined $string || $@;
+    $self->save_server_load($string, @now);
+}
+
+# The load of the game server, from its answer to "stats" ("status_json" for CS2)
+sub save_server_load {
+    my ($self, $string, $new_timestamp, $act_players, $min_players, $max_players, $map_then) = @_;
 
     my ($fps, $uptime, $map);
     if ( $self->{play_game} == CS2() ) {
 
        $fps      = ($string =~ /"frametime_ms": ([\d.]+)/) ? sprintf("%.2f", 1000 / $1) : '0.00';
        ($uptime) = $string =~ /"process_uptime": ([\d]+)/;
-       $map      = $self->{map};
+       $map      = $map_then;
 
     } else {
 
@@ -523,7 +703,7 @@ sub track_server_load {
         $string =~ /([^ ]+)\s+([^ ]+)\s+([^ ]+)\s+([^ ]+)\s+([^ ]+)\s+([^ ]+)\s+([^ ]+)\s*([^ ]*)/;
         $uptime = $4;
         $fps = $6;
-        $map = $self->{map};
+        $map = $map_then;
 
     }
     ::exec_cache("flush_server_load",
@@ -539,10 +719,10 @@ sub track_server_load {
                 fps=?",
         $self->{id},
         $new_timestamp,
-        $self->{num_players_load},
-        $self->{minplayers},
-        $self->{maxplayers},
-        $self->{map},
+        $act_players,
+        $min_players,
+        $max_players,
+        $map_then,
         ($uptime?$uptime:0),
         ($fps?$fps:0)
     );
@@ -555,21 +735,19 @@ sub dostats
     my $rcon_obj = $self->{rcon_obj};
     $rcmd = $self->{broadcasting_command_announce};
 
+    # ShowStats, with or without BroadCastEvents (messageAll forced: it sends nothing without it)
     if (($::g_stdin == 0) && ($rcon_obj) && ($self->{rcon} ne ""))  
     {
-        if ($self->{broadcasting_events} == 1)
-        {
-            my $hpk = sprintf("%.0f", 0);
+        my $hpk = sprintf("%.0f", 0);
 
-            if ($self->{total_kills} > 0) {
-                $hpk = sprintf("%.2f", (100/$self->{total_kills})*$self->{total_headshots});
-            }  
-            if ($rcmd ne "") {
-                $self->dorcon("$rcmd ".$self->quoteparam("HLstatsZ - Tracking ".::number_format($self->{players})." players with ".::number_format($self->{total_kills})." kills and ".::number_format($self->{total_headshots})." headshots ($hpk%)"));
-            } else {
-                $self->messageAll("HLstatsZ - Tracking ".::number_format($self->{players})." players with ".::number_format($self->{total_kills})." kills and ".::number_format($self->{total_headshots})." headshots ($hpk%)");
-            }
+        if ($self->{total_kills} > 0) {
+            $hpk = sprintf("%.2f", (100/$self->{total_kills})*$self->{total_headshots});
         }  
+        if ($rcmd ne "") {
+            $self->dorcon("$rcmd ".$self->quoteparam("HLstatsZ - Tracking ".::number_format($self->{players})." players with ".::number_format($self->{total_kills})." kills and ".::number_format($self->{total_headshots})." headshots ($hpk%)"));
+        } else {
+            $self->messageAll("HLstatsZ - Tracking ".::number_format($self->{players})." players with ".::number_format($self->{total_kills})." kills and ".::number_format($self->{total_headshots})." headshots ($hpk%)", 0, 1);
+        }
     }  
 }      
 
@@ -584,52 +762,17 @@ sub get_map
         if ( ( $since > 120 ) || ( $self->{map} ne $self->{server_map} && $since >= 5 ) || ( defined $host->{map} ) ) {
 
             $self->{last_check} = time();
-            my $temp_map        = "";
-            my $temp_maxplayers = -1;
-            my $servhostname    = "";
-            my $difficulty      = 0;
-            my $update          = 0;
-            
+
             if ($self->{rcon_obj}) {
 
                 if (defined $host && ($self->{play_game} != L4D() || $self->{"difficulty"} > 0)) {
-                    $temp_map          = $host->{"map"};
-                    $temp_maxplayers   = $host->{"max_players"};
-                    $servhostname      = $host->{"name"};
-                } else {
-                    ($temp_map, $temp_maxplayers, $servhostname, $difficulty) = $self->rcon_getStatus();
+                    $self->set_status($host->{"map"}, $host->{"max_players"}, $host->{"name"}, 0);
+                # The game server is asked without waiting, set_status() gets its answer when it comes (the first
+                # lines of a server are held until then: hold_lines). No connection and none being opened: as before.
+                } elsif (!$self->rcon_getStatus_later()) {
+                    $self->set_status($self->rcon_getStatus());
                 }
 
-                if ($temp_map) {
-
-                    if ($self->{map} ne $temp_map) {
-                        $self->{map} = $temp_map;
-                        $update++;
-                    }
-
-                    if (($temp_maxplayers != -1) && ($temp_maxplayers > 0) && ($temp_maxplayers)) {
-                        if ($self->{maxplayers} != $temp_maxplayers) {
-                            $self->{maxplayers} = $temp_maxplayers;
-                            ::printEvent("RCON", " Max players: $temp_maxplayers",1,"$self->{address}:$self->{port}");
-                            $update++;
-                        }
-                    }
-                    if (($difficulty > 0) && ($self->{play_game} == L4D()) && ($self->{difficulty} != $difficulty) ) {
-                        $self->{difficulty} = $difficulty;
-                        ::printEvent("RCON", "Set difficulty ".$self->{difficulty}." successfully",3,"$self->{address}:$self->{port}");
-                    }
-                    if (($self->{update_hostname} > 0) && ($self->{name} ne $servhostname) && ($servhostname)) {
-                        $self->{name} = $servhostname;
-                        $update++;
-                    }
-
-                }
-
-            }
-
-            if ($update > 0) {
-                ::printEvent("RCON", "Got new map ".$self->{map}." successfully",3,"$self->{address}:$self->{port}");
-                $self->updateDB();
             }
 
         }
@@ -639,27 +782,79 @@ sub get_map
 
 }
 
+#
+# What the game server says of itself (rcon status): its map, its player slots, its name, its difficulty (L4D)
+#
+sub set_status
+{
+    my ($self, $temp_map, $temp_maxplayers, $servhostname, $difficulty) = @_;
+    my $update = 0;
+
+    if ($temp_map) {
+
+        if ($self->{map} ne $temp_map) {
+            $self->{map} = $temp_map;
+            $update++;
+        }
+
+        if (($temp_maxplayers != -1) && ($temp_maxplayers > 0) && ($temp_maxplayers)) {
+            if ($self->{maxplayers} != $temp_maxplayers) {
+                $self->{maxplayers} = $temp_maxplayers;
+                ::printEvent("RCON", " Max players: $temp_maxplayers",1,"$self->{address}:$self->{port}");
+                $update++;
+            }
+        }
+        if (($difficulty > 0) && ($self->{play_game} == L4D()) && ($self->{difficulty} != $difficulty) ) {
+            $self->{difficulty} = $difficulty;
+            ::printEvent("RCON", "Set difficulty ".$self->{difficulty}." successfully",3,"$self->{address}:$self->{port}");
+        }
+
+        $servhostname = ::utf8_text($servhostname);
+        # Not during a match: the server is named after it then (HLstats_Match.plib)
+        if (($self->{update_hostname} > 0) && ($self->{name} ne $servhostname) && ($servhostname) && !$self->{match}) {
+            $self->{name} = $servhostname;
+            $update++;
+        }
+
+    }
+
+    if ($update > 0) {
+        ::printEvent("RCON", "Got new map ".$self->{map}." successfully",3,"$self->{address}:$self->{port}");
+        $self->updateDB();
+    }
+}
+
 sub get_lan_players
 {
     my ($self) = @_;
 
     if ($::g_mode eq "LAN")  {
-        my %players = $self->rcon_getplayers();
-        while ( my($p_uid, $p_obj) = each(%players) )
-        {    
-            my $srv_addr = $self->{address}.":".$self->{port};
-            my $userid   = $p_obj->{"UserID"};
-            my $name     = $p_obj->{"Name"};
-            my $address  = $p_obj->{"Address"};
-            ::g_lan_noplayerinfo->{"$srv_addr/$userid/$name"} = {
-                ipaddress => $address,
-                userid => $userid,
-                name => $name,
-                server => $srv_addr
-            };
-        }
-        ::printEvent("RCON", "get_lan_players successfully",3,"$self->{address}:$self->{port}");
+        # Without waiting for the game server where that can be done
+        Scalar::Util::weaken(my $weak = $self);
+        return if $self->rcon_getplayers_later(sub { $weak->set_lan_players(@_) if $weak });
+        $self->set_lan_players($self->rcon_getplayers());
     }
+}
+
+# The players of the game server's answer to "status", for the LAN mode
+sub set_lan_players
+{
+    my ($self, %players) = @_;
+    while ( my($p_uid, $p_obj) = each(%players) )
+    {
+        next unless ref($p_obj) eq 'HASH' && defined $p_obj->{"UserID"};    # the host, no answer
+        my $srv_addr = $self->{address}.":".$self->{port};
+        my $userid   = $p_obj->{"UserID"};
+        my $name     = $p_obj->{"Name"};
+        my $address  = $p_obj->{"Address"};
+        ::g_lan_noplayerinfo->{"$srv_addr/$userid/$name"} = {
+            ipaddress => $address,
+            userid => $userid,
+            name => $name,
+            server => $srv_addr
+        };
+    }
+    ::printEvent("RCON", "get_lan_players successfully",3,"$self->{address}:$self->{port}");
 }
 
 sub clear_winner
@@ -1123,8 +1318,11 @@ sub flushDB
 sub flush_player_count
 {
     my ($self) = @_;
-    
-    ::exec_cache("flush_plyr_cnt", "UPDATE hlstats_Servers SET act_players=? WHERE serverId=?", $self->{numplayers}, $self->{id});
+
+    # updatePlayerCount() also runs at every change of team: written when it is not the number last written
+    return if defined $self->{act_players_db} && $self->{act_players_db} == $self->{numplayers};
+    $self->{act_players_db} = $self->{numplayers}
+        if ::exec_cache("flush_plyr_cnt", "UPDATE hlstats_Servers SET act_players=? WHERE serverId=?", $self->{numplayers}, $self->{id});
 }
 
 # The IP to geolocate the server
@@ -1171,8 +1369,8 @@ sub update_server_loc {
 
     my ($servcity, $servcountry, $servlat, $servlng);
 
-    # If MaxMind binary API loaded
-    if ($::g_geoip_binary && $::g_gi) {
+    # GeoLite2-City.mmdb is open
+    if ($::g_gi) {
         my $geoCity;
         eval { $geoCity = $::g_gi->city( ip => $server_ip ); };
         $geoCity = undef if $@;
@@ -1202,41 +1400,7 @@ sub update_server_loc {
         }
         return 1;
     }
-    # GeoLite tables
-    my @oct = split(/\./, $server_ip // '');
-    return 0 unless @oct == 4;  # invalid IP -> nothing to do
-    my $ip_number = $oct[0]*16777216 + $oct[1]*65536 + $oct[2]*256 + $oct[3];
-    # 1) lookup locId
-    my $res =::query_now(
-        "SELECT locId FROM geoLiteCity_Blocks WHERE startIpNum<=? AND endIpNum>=? LIMIT 1",
-        $ip_number, $ip_number);
-    return unless ($res->rows > 0);
-
-    my $locid = $res->fetchrow_array;
-    $res->finish;
-
-    my $res2 = ::query_now(
-            "SELECT a.city, b.name AS country, a.latitude AS lat, a.longitude AS lng
-             FROM geoLiteCity_Location a
-             INNER JOIN hlstats_Countries b ON a.country = b.flag
-             WHERE a.locId = ?
-             LIMIT 1",
-            $locid
-        );
-    return unless ($res2->rows > 0);
-
-    ($servcity,$servcountry,$servlat,$servlng) = $res2->fetchrow_array;
-    $res2->finish;
-
-    # Use undef for NULLs
-    ::exec_now(
-        "UPDATE hlstats_Servers SET city=?, country=?, lat=?, lng=? WHERE serverId=?",
-        (defined $servcity ? $servcity : undef),
-        (defined $servcountry ? $servcountry : undef),
-        (defined $servlat ? $servlat : undef),
-        (defined $servlng ? $servlng : undef),
-        $serverid
-    );
+    return 0;
 }
 
 sub messageAll
@@ -1326,9 +1490,14 @@ sub setHlxCvars
     }
     $self->dorcon("hlxce_version \"".$::g_version."\"");
     
-    if ($self->{mod} eq "MANI" && ($self->dorcon("mani_hlx_prefix") // '') =~ /gameme/i)
+    if ($self->{mod} eq "MANI")
     {
-        $self->dorcon("mani_hlx_prefix \"HLstatsZ\"");
+        # Without waiting for the answer where that can be done
+        Scalar::Util::weaken(my $weak = $self);
+        my $set_prefix = sub {
+            $weak->dorcon("mani_hlx_prefix \"HLstatsZ\"") if $weak && ($_[0] // '') =~ /gameme/i;
+        };
+        $set_prefix->(scalar $self->dorcon("mani_hlx_prefix")) unless $self->dorcon_later("mani_hlx_prefix", $set_prefix);
     }
 }
 

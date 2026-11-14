@@ -12,6 +12,8 @@ package HLstats_Game;
 #    https://github.com/SnipeZilla
 #    https://forums.alliedmods.net/forumdisplay.php?f=156
 
+use strict;
+
 #
 # Constructor
 #

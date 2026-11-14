@@ -1,0 +1,76 @@
+{
+  "Enable_HLstats": false,
+  "Enable_Sourcebans": true,
+  "Log_Address": "",
+  "Log_Port": 27500,
+  "BroadcastAll": 0,
+  "ServerAddr": "",
+  "HLZ_Prefix":"",
+  "Version": 2,
+
+  "SourceBans": {
+    "Host": "",
+    "Port": 3306,
+    "SslMode": "None",
+    "Database": "sourcebans",
+    "Prefix": "sb",
+    "User": "",
+    "Password": "",
+    "Website": "https://bans.example.com",
+    "VoteKick": "public",
+    "KickDelay": 5,
+    "Chat_Ban_Duration_Max": 10080,
+    "Menu_Ban1_Duration": 15,
+    "Menu_Ban2_Duration": 60,
+    "Menu_Ban3_Duration": 1440,
+    "Menu_Ban4_Duration": 10080,
+    "Menu_Ban5_Duration": 0
+  },
+
+  "Maps": {
+    "VoteMap": "public",
+    "Nominate": true,
+    "MapCycle": {
+      "Admin": {
+        "Maps": ["workshop/3240327667/awp_lego_3"]
+      },
+      "Public": {
+        "Maps": ["de_inferno",
+                 "de_mirage",
+                 "de_nuke",
+                 "de_overpass",
+                 "de_ancient",
+                 "workshop/3552466076/mocha"]
+      }
+    }
+  },
+
+  "Avertissements": [
+    { "Message": "<div style='width:220px;text-align:center;'><img src=\"https://avatars.akamai.steamstatic.com/48a539ae74f42f72fd58b3cf8ba02e3054451f7b.jpg\" width='32' height='32' style='width:32px;height:32px;border-radius:4px;display:block;margin:0 auto 6px auto;' /><div style='color:#ffffff;font-size:20px;font-weight:bold;text-shadow:1px 1px 2px #000000;'>Welcome to the server!</div></div>", "PrintType": "html", "EveryMinutes": 15 },
+    { "Message": "Welcome to Snipe{red}Zilla{default}!", "PrintType": "say", "EveryMinutes": 10 }
+  ],
+
+  "Welcomes": [
+    { "Welcome": "Welcome to Snipe{red}Zilla{default}!<br>{blue}{name}{default}, We were waiting for you!", "PrintType": "html", "Delay": 10 },
+    { "Welcome": "Welcome to Snipe{red}Zilla{default}!<br>Oh look who’s back — {name}! Try not to die instantly this time...", "PrintType": "html", "Delay": 10 },
+    { "Welcome": "Welcome to Snipe{red}Zilla{default}, {name}!<br>We missed you...kind of.", "PrintType": "html", "Delay": 10 },
+    { "Welcome": "Welcome to Snipe{red}Zilla{default}, {name}!<br>Weather report for {map}: 100% dying.", "PrintType": "html", "Delay": 10 }
+  ],
+
+  "PlayerDeath": [
+    { "Message": "{red}{victim}{default}, you got terminated by {blue}{killer}{default} using {green}{weapon}{default} (Headshot:{headshot}).<br>Ouch.", "PrintType": "html", "Duration": 5 },
+    { "Message": "Dead again...<br>Courtesy of Snipe{red}Zilla{default}", "PrintType": "html", "Duration": 5 },
+    { "Message": "{red}{victim}{default},<br>you got a free trip to spectator mode,<br>Courtesy of {gold}{killer}{default}.", "PrintType": "html", "Duration": 5 },
+    { "Message": "{red}{victim}{default},<br>your extended warranty does not cover {green}{weapon}{default} damage.", "PrintType": "html", "Duration": 5 }
+  ],
+
+  "Discord": {
+    "Username": "HLstatsZ",
+    "WebhookUrl": "https://discord.com/api/webhooks/123456789/..........",
+    "LogsWebhookUrl": "https://discord.com/api/webhooks/123456789/..........",
+    "ColorPermanent": "#FF0000",
+    "ColorWithExpiration": "#FF9900",
+    "ColorUnban": "#00FF00",
+    "ShowAdmin": true
+  }
+}

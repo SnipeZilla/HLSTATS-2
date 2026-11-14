@@ -31,6 +31,7 @@ my $opt_libdir = "./";
 use Getopt::Long;
 use DBI;
 use Encode;
+use File::Spec;
 
 require "$opt_libdir/ConfigReaderSimple.pm";
 do "$opt_libdir/HLstats.plib";
@@ -58,6 +59,7 @@ my $opt_geoip = 0;
 my $opt_prune = 0;
 my $opt_optimize = 0;
 my $opt_verbose = 0;
+my $opt_nodebug = 0;
 our $opt_cpanelhack = 0;
 
 our $db_host = "localhost";
@@ -98,6 +100,7 @@ Generate awards from Half-Life server statistics.
  Other options:
   -h, --help                      display this help and exit
   -v, --version                   output version information and exit
+  -n, --nodebug                   print nothing (errors still are)
       --numdays                   number of days in period for awards
       --date=YYYY-MM-DD           day after date to calculate awards for (defaults to today) 
                                     If you specify a date like 2008-01-04 it will do awards
@@ -163,8 +166,12 @@ GetOptions(
     "db-password=s"     => \$db_pass,
     "db-username=s"     => \$db_user,
     "configfile|c=s"    => \$configfile,
-    "verbose"           => \$opt_verbose
+    "verbose"           => \$opt_verbose,
+    "nodebug|n"         => \$opt_nodebug
 ) or die($usage);
+
+# -n: nothing is printed (the daemon passes it when it runs with -n itself). Errors still are, on STDERR.
+open(STDOUT, '>', File::Spec->devnull()) if $opt_nodebug;
 
 if ($opt_help)
 {
@@ -975,183 +982,68 @@ sub DoRibbons {
 sub DoGeoIP
 {
     print "++ Looking up missing player locations... ";
-    
-    my $useGeoIPBinary = 0;
-    my $gi = undef;
-    my $dogeo = 0;
+
+    my $geoipfile = "$opt_libdir/GeoLiteCity/GeoLite2-City.mmdb";
+    unless (-r $geoipfile) {
+        print "skipped: $geoipfile NOT FOUND\n";
+        return;
+    }
+
+    if ($opt_cpanelhack) {
+        my $home_dir = $ENV{ HOME };
+        my $base_module_dir = (-d "$home_dir/perl" ? "$home_dir/perl" : ( getpwuid($>) )[7] . '/perl/');
+        unshift @INC, map { $base_module_dir . $_ } @INC;
+    }
+
+    unless (eval { require GeoIP2::Database::Reader; 1 }) {
+        print "skipped: the GeoIP2 module is not installed\n";
+        return;
+    }
+    my $gi = eval { GeoIP2::Database::Reader->new(file => $geoipfile, locales => [ 'en' ]) };
+    unless ($gi) {
+        print "skipped: $geoipfile errored while opening\n";
+        return;
+    }
+
     my $cnt = 0;
-    
-    # Sanity checks to see if we can do geolocation updates
-    $result = query_now("
-        SELECT
-            value
-        FROM
-            hlstats_Options
-        WHERE
-            keyname='UseGeoIPBinary'
-            AND value > '0'
-        LIMIT 1
-    ");
-    
-    if ($result->rows > 0)
-    {
-        $useGeoIPBinary = 1;
-        $geoipfile = "$opt_libdir/GeoLiteCity/GeoLite2-City.mmdb";
-    }
-    else
-    {
-        $useGeoIPBinary = 0;
-    }
-    
-    if ($useGeoIPBinary == 0)
-    {
-        my $result = query_now("SELECT locId FROM geoLiteCity_Blocks LIMIT 1;");
-        if ($result->rows > 0)
+    $result = query_now("SELECT playerId, lastAddress, lastName FROM hlstats_Players WHERE flag='' AND lastAddress<>'';");
+
+    while (my($pid, $address, $name) = $result->fetchrow_array) {
+        $address =~ s/^\s+|\s+$//g;
+        next if ($address !~ /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/);
+        if ($opt_verbose)
         {
-            $dogeo = 1;
-        }
-        else
-        {
-            printEvent("ERROR", "GeoIP method set to database but geoLiteCity tables are empty.", 1);
-        }
-    }
-    elsif ($useGeoIPBinary == 1 && -r $geoipfile)
-    {
-        if ($opt_cpanelhack) {
-            my $home_dir = $ENV{ HOME };
-            my $base_module_dir = (-d "$home_dir/perl" ? "$home_dir/perl" : ( getpwuid($>) )[7] . '/perl/');
-            unshift @INC, map { $base_module_dir . $_ } @INC;
+            print "Attempting to find location for: ".$name." (".$address.")\n";
         }
 
-        eval "use GeoIP2::Database::Reader";
-        
-        $gi = GeoIP2::Database::Reader->new(
-            file    => $geoipfile,
-            locales => [ 'en' ]
-        );
+        my $geoCity = undef;
+        eval { $geoCity = $gi->city( ip => $address ); };
+        next if ($@ || !$geoCity);
 
-        if ($gi) 
-        {
-            $dogeo = 1;
-        }
-        else
-        {
-            printEvent("ERROR", "GeoIP method set to binary file lookup but $geoipfile errored while opening.", 1);
-            $gi = undef;
-        }
-    }
-    else
-    {
-        printEvent("ERROR", "GeoIP method set to binary file lookup but $geoipfile NOT FOUND", 1);
-    }
+        my $lat = $geoCity->location()->latitude();
+        my $lng = $geoCity->location()->longitude();
+        next unless ($lng);
 
-        
-    if ($dogeo) {
-        sub ip2number {
-            my ($ipstr) = @_;
-            my @ip = split(/\./, $ipstr);
-            my $number = ($ip[0]*16777216) + ($ip[1]*65536) + ($ip[2]*256) + $ip[3];
-
-            return $number;
-        }
-
-        sub trim {
-            my $string = shift;
-            $string =~ s/^\s+|\s+$//g;
-            return $string;
-        }
-        $result = query_now("SELECT playerId, lastAddress, lastName FROM hlstats_Players WHERE flag='' AND lastAddress<>'';");
-                
-        while (my($pid, $address, $name) = $result->fetchrow_array) {
-            $address = trim($address);
-            next if ($address !~ /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/);
-            if ($opt_verbose)
-            {
-                print "Attempting to find location for: ".$name." (".$address.")\n";
-            }
-            my $number = ip2number($address);
-            my $update = 0;
-            my $foundflag = "";
-            my $foundcountry = "";
-            my $foundcity = "";
-            my $foundstate = "";
-            my $foundlat = 0;
-            my $foundlng = 0;
-            if ($useGeoIPBinary > 0) {
-                if ($opt_verbose)
-                {
-                    print "2 ".$pid." ".$address."\n";
-                }
-
-                my $country_code = undef;
-                my $country_name = undef;
-                my $region = undef;
-                my $city = undef;
-                my $lat = undef;
-                my $lng = undef;
-
-                my $geoCity = undef;
-        
-                eval { $geoCity = $gi->city( ip => $address ); };
-                $geoCity = undef if $@;
-
-                if ($geoCity) {
-
-                    my $geoCityRec = $geoCity->city();
-                    my $geoCountryRec = $geoCity->country();
-                    my $geoLocationRec = $geoCity->location();
-                    my $geoPostalRec = $geoCity->postal();
-                    my $geoMostSpecificSubdivision = $geoCity->most_specific_subdivision();
-
-                    $country_code = $geoCountryRec->iso_code();
-                    $country_name = $geoCountryRec->name();
-                    $region = $geoMostSpecificSubdivision->name();
-                    $city = $geoCityRec->name();
-                    $postal_code = $geoPostalRec->code();
-                    $lat = $geoLocationRec->latitude();
-                    $lng = $geoLocationRec->longitude();
-                }    
-
-                if ($lng) {
-
-                    $foundflag = $country_code;
-                    $foundcountry = $country_name;
-                    $foundcity = $city;
-                    $foundstate = $region;
-                    $foundlat = $lat;
-                    $foundlng = $lng;
-                    $update++;
-                }
-            }
-            else
-            {
-                $result2 = query_now("SELECT locId FROM geoLiteCity_Blocks WHERE startIpNum<=? AND endIpNum>=? LIMIT 1;",$number,$number);
-                if ($result2->rows > 0) {
-                    my ($locid) = $result2->fetchrow_array;
-                    $data = query_now("SELECT city, region AS state, name AS country, country AS flag, latitude AS lat, longitude AS lng FROM geoLiteCity_Location a  inner join hlstats_Countries b ON a.country=b.flag WHERE locId=? LIMIT 1;",$locid);
-                    if ($data->rows > 0) {
-                        ($foundcity, $foundstate, $foundcountry, $foundflag, $foundlat, $foundlng) = $data->fetchrow_array;
-                        $update++;
-                    }
-                }
-            }
-            if ($update > 0)
-            {
-                exec_now("
-                    UPDATE
-                        hlstats_Players
-                    SET
-                        flag=?,
-                        country=?,
-                        lat='".(($foundlat ne "")?$foundlat:undef)."',
-                        lng='".(($foundlng ne "")?$foundlng:undef)."',
-                        city=?,
-                        state=?
-                    WHERE
-                        playerId=?",$foundflag,$foundcountry,$foundcity,$foundstate,$pid);
-                $cnt++;
-            }
-        }
+        # Many addresses have a country but no city or region: those columns take '', not NULL
+        $cnt++ if exec_now("
+            UPDATE
+                hlstats_Players
+            SET
+                flag=?,
+                country=?,
+                lat=?,
+                lng=?,
+                city=?,
+                state=?
+            WHERE
+                playerId=?",
+            $geoCity->country()->iso_code() // '',
+            $geoCity->country()->name() // '',
+            $lat,
+            $lng,
+            $geoCity->city()->name() // '',
+            $geoCity->most_specific_subdivision()->name() // '',
+            $pid);
     }
     printf ("done%s\n", (($cnt>0)?" (updated $cnt players)":""));
 }
@@ -1198,6 +1090,7 @@ sub DoClans
     while ( my($playerId, $name, $game) = $result->fetchrow_array)
     {
         my $clanTag = "";
+        my $clanName = "";
         my $clanId = 0;
         foreach (@clanpatterns)
         {
@@ -1205,7 +1098,8 @@ sub DoClans
             if ($name =~ /$_/i)
             {
                 $clanTag  = $1;
-                $clanName = $2;
+                $clanName = $1;
+                $clanName =~ s/^\[([^\]]*)\]$/$1/;
                 last;
             }            
         }

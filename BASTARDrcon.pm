@@ -20,6 +20,7 @@ use IO::Select;
 use Scalar::Util;
 use Time::HiRes qw(time);
 use Mojo::IOLoop;
+use Mojo::Promise;
 use bytes;
 
 ##
@@ -31,6 +32,10 @@ my $RETRY_EVERY = 1;      # seconds between attempts while the server does not a
 my $QUEUE_MAX   = 100;    # messages kept while a challenge is being asked for ...
 my $QUEUE_TTL   = 10;     # ... for this many seconds at most
 my $STATUS_END  = qr/^\s*\d+ users?\s*$/m;    # the last line of "status": its answer is complete
+my $NEXT_PACKET = 0.2;    # seconds between the packets of one answer, at most
+my $WIRE_MAX    = 200;    # commands that wait for the answer to a question before they are sent
+my $SETTLE      = 0.3;    # seconds a question waits after a message: the answer to it would be taken for its own ...
+my $SETTLE_MAX  = 1.5;    # ... three times what the game server takes to answer, when that is more, up to this
 
 #
 # Constructor
@@ -54,7 +59,11 @@ sub new
     $self->{rcon_err}      = 0;
     $self->{ready}         = 0;     # challenge known and password checked: commands go out
     $self->{opening}       = '';    # 'challenge', then 'probe' (the password checked), while a challenge is asked for
-    $self->{tried}         = 0;     # the first challenge is asked at once, every later one in the background
+    # HL1 answers carry no id: a question of execute_later is alone on the wire, nothing is sent until its answer
+    $self->{wire}          = [];    # [command, callback, $done, on_send]: commands not sent yet, in order (no callback: a message)
+    $self->{asking}        = undef; # the question that waits for its answer
+    $self->{hold}          = 0;     # a command the daemon waits for is on the wire: nothing else is sent
+    $self->{sent_at}       = 0;     # when the last message was sent
     $self->{retry_at}      = 0;     # no new attempt before this time (a second after a failure)
     $self->{retry_wait}    = 0;     # after a refused password: seconds between attempts, doubled each time
     $self->{queue}         = [];    # [time, command] of the messages given while a challenge was asked for
@@ -86,7 +95,16 @@ sub execute_nowait
 {
     my ($self, $command) = @_;
     if ($self->_ready()) {
-        return 1 if $self->_send_rcon($command);
+        # A question waits for its answer, or to be sent: the message is sent after it
+        if ($self->{asking} || @{ $self->{wire} }) {
+            return 0 if @{ $self->{wire} } >= $WIRE_MAX;
+            push @{ $self->{wire} }, [$command];
+            return 1;
+        }
+        if ($self->_send_rcon($command)) {
+            $self->{sent_at} = time();
+            return 1;
+        }
         $self->_lost("Cannot send to the server: $!");
     }
     my $queue = $self->{queue};
@@ -96,12 +114,197 @@ sub execute_nowait
 }
 
 #
+# Ask the game server something without waiting for its answer: $cb->($answer) is called when it comes, $cb->(undef)
+# when it gives none within $TIMEOUT seconds. Returns 0 when the question cannot be asked now (no challenge and none
+# being asked for): the caller asks with execute(). A command with arguments is a message, as in execute(): it is
+# sent, and the answer is "". $done: the answer is complete once it matches.
+#
+sub execute_later
+{
+    my ($self, $command, $cb, $done, $on_send) = @_;
+    return 0 if $::g_stdin;
+
+    if ($command !~ /^\S+$/) {
+        $self->execute_nowait($command);
+        my $addr = $self->{addr};
+        Mojo::IOLoop->next_tick(sub { _later_call($addr, $cb, "") });
+        return 1;
+    }
+    $done //= $STATUS_END if $command eq 'status';
+
+    unless ($self->_ready()) {
+        # A challenge is being asked for: the question waits for it, and gets no answer if there is none
+        return 0 unless $self->{opening} && @{ $self->{wire} } < $WIRE_MAX;
+        push @{ $self->{wire} }, [$command, $cb, $done, $on_send];
+        return 1;
+    }
+    return 0 if @{ $self->{wire} } >= $WIRE_MAX;
+    push @{ $self->{wire} }, [$command, $cb, $done, $on_send];
+    $self->_wire_pump();
+    return 1;
+}
+
+# The game server can be asked without waiting: its challenge is known, or being asked for
+sub can_ask
+{
+    my ($self) = @_;
+    return 0 if $::g_stdin;
+    return 1 if $self->_ready() || $self->{opening};
+    return 0;
+}
+
+#
+# Ask the game server something without waiting: a promise of its answer (undef when it gives none). Never rejected.
+#
+sub ask
+{
+    my ($self, $command) = @_;
+    my $promise = Mojo::Promise->new;
+    $promise->resolve(undef) unless $self->execute_later($command, sub { $promise->resolve($_[0]) });
+    return $promise;
+}
+
+#
+# Send what waits on the wire, in order: the messages one after the other, a question $SETTLE seconds after the last
+# message (its answer has no id: the answer to a message would be taken for it), and nothing after it until its answer.
+#
+sub _wire_pump
+{
+    my ($self) = @_;
+    my $wire = $self->{wire};
+    my $reactor = Mojo::IOLoop->singleton->reactor;
+    Scalar::Util::weaken(my $weak = $self);
+
+    while (@$wire && !$self->{asking} && !$self->{hold} && $self->{ready} && $self->{rcon_socket}) {
+        my ($command, $cb, $done, $on_send) = @{ $wire->[0] };
+
+        unless ($cb) {
+            shift @$wire;
+            unless ($self->_send_rcon($command)) {
+                $self->_lost("Cannot send to the server: $!");
+                return;
+            }
+            $self->{sent_at} = time();
+            next;
+        }
+
+        my $settle = 3 * ($self->{rtt} // 0);
+        $settle = $SETTLE     if $settle < $SETTLE;
+        $settle = $SETTLE_MAX if $settle > $SETTLE_MAX;
+        my $wait = $self->{sent_at} + $settle - time();
+        if ($wait > 0) {
+            $self->{settle_timer} ||= $reactor->timer($wait => sub {
+                return unless $weak;
+                delete $weak->{settle_timer};
+                $weak->_wire_pump();
+            });
+            return;
+        }
+
+        shift @$wire;
+        unless ($self->_send_rcon($command)) {
+            my $addr = $self->{addr};
+            Mojo::IOLoop->next_tick(sub { _later_call($addr, $cb, undef) });
+            $self->_lost("Cannot send to the server: $!");
+            return;
+        }
+        my $now = time();
+        $self->{asking} = {
+            cmd => $command, cb => $cb, done => $done, ans => '', at => $now, rx => $now,
+            timer => $reactor->timer($TIMEOUT => sub { $weak->_ask_end() if $weak }),
+        };
+        $on_send->() if $on_send;
+    }
+}
+
+# A packet of the answer to the question on the wire
+sub _ask_packet
+{
+    my ($self, $buf) = @_;
+    my $ask = $self->{asking};
+    # What the game server takes to answer: the first packet of an answer (a moving average)
+    unless (length $ask->{ans}) {
+        my $rtt = time() - $ask->{at};
+        $self->{rtt} = defined $self->{rtt} ? 0.7 * $self->{rtt} + 0.3 * $rtt : $rtt;
+    }
+    $ask->{ans} .= $buf;
+    $ask->{rx}   = time();
+    return $self->_ask_end() if $ask->{done} && $ask->{ans} =~ $ask->{done};
+
+    # The next packet comes within $NEXT_PACKET seconds, or the answer is complete
+    my $reactor = Mojo::IOLoop->singleton->reactor;
+    $reactor->remove($ask->{timer});
+    Scalar::Util::weaken(my $weak = $self);
+    $ask->{timer} = $reactor->timer($NEXT_PACKET => sub { $weak->_ask_end() if $weak });
+}
+
+# The answer to the question on the wire is complete, or there is none: its callback is called at the next turn of
+# the event loop. Without an answer the server is down or loading a map: a new challenge is asked for.
+sub _ask_end
+{
+    my ($self) = @_;
+    my $ask = delete $self->{asking} or return;
+    Mojo::IOLoop->singleton->reactor->remove($ask->{timer});
+    my $ans  = length($ask->{ans}) ? $ask->{ans} : undef;
+    my $addr = $self->{addr};
+    my $cb   = $ask->{cb};
+    Mojo::IOLoop->next_tick(sub { _later_call($addr, $cb, $ans) });
+
+    unless (defined $ans) {
+        ::printEvent("RCON", "$ask->{cmd} :: Failed to read packet", 1, $addr);
+        $self->_lost("No answer");
+        return;
+    }
+    $self->{rcon_err} = 0;
+    $self->_wire_pump();
+}
+
+# A callback of execute_later: an error in it is reported, and does not stop what the event loop does next
+sub _later_call
+{
+    my ($addr, $cb, $answer) = @_;
+    return if eval { $cb->($answer); 1 };
+    my $why = $@;
+    $why =~ s/\s+\z//;
+    ::printEvent("RCON", "Error while handling an answer: $why", 1, $addr);
+}
+
+# Before a command the daemon waits for: the answer to the question that is on the wire is read first
+sub _ask_wait
+{
+    my ($self) = @_;
+    while (my $ask = $self->{asking}) {
+        my $now = time();
+        if (length $ask->{ans}) {
+            $self->_ask_end(), next if $now - $ask->{rx} >= $NEXT_PACKET;
+        } elsif ($now - $ask->{at} >= $TIMEOUT) {
+            $self->_ask_end();
+            next;
+        }
+        $self->_read_packets(0.05);
+    }
+}
+
+#
 # A command whose answer is wanted
 #
 sub _sendrecv
 {
     my ($self, $cmd, $done, $retried) = @_;
     return "" unless $self->_ready();
+    # Alone on the wire, as a question of execute_later
+    $self->{hold} = 1;
+    $self->_ask_wait();
+    my $ans = $self->_sendrecv_now($cmd, $done, $retried);
+    $self->{hold} = 0;
+    $self->_wire_pump();
+    return $ans;
+}
+
+sub _sendrecv_now
+{
+    my ($self, $cmd, $done, $retried) = @_;
+    return "" unless $self->{ready};
     unless ($self->_send_rcon($cmd)) {
         $self->_lost("Cannot send to the server: $!");
         return "";
@@ -124,7 +327,7 @@ sub _sendrecv
         }
         ::printEvent("RCON", "Challenge expired", 1, $self->{addr});
         return "" unless $self->_open_now();
-        return $self->_sendrecv($cmd, $done, 1);
+        return $self->_sendrecv_now($cmd, $done, 1);
     }
     $self->{rcon_err} = 0;
     return $ans;
@@ -133,7 +336,6 @@ sub _sendrecv
 #
 # Challenge known and password checked. Otherwise a challenge is asked for in the background (not before retry_at
 # after a failure) and the caller goes on without it: a server that is down never makes the daemon wait.
-# The very first one is asked at once: the server just sent its first log line, and the daemon needs its map.
 #
 sub _ready
 {
@@ -142,7 +344,6 @@ sub _ready
     $self->_read_packets(0) if $self->{ready};
     return 1 if $self->{ready};
     return 0 if $self->{opening} || $self->{retry_at} > time() || $self->{destroyed};
-    return $self->_open_now() unless $self->{tried}++;
     $self->_open();
     return 0;
 }
@@ -236,7 +437,8 @@ sub _handle_packet
         return $opening ? $self->_refused() : $self->_lost("Bad rcon_password");
     }
     return $self->_opened() if $opening eq 'probe';
-    # Otherwise the answer to a message: nothing reads it
+    # The answer to the question on the wire. Otherwise the answer to a message: nothing reads it
+    return $self->_ask_packet($buf) if $self->{asking};
 }
 
 sub _opened
@@ -263,7 +465,10 @@ sub _opened
     for my $q (@queue) {
         next if $now - $q->[0] > $QUEUE_TTL;
         last unless $self->_send_rcon($q->[1]);
+        $self->{sent_at} = $now;
     }
+    # The questions asked while the challenge was asked for
+    $self->_wire_pump();
     return 1;
 }
 
@@ -353,6 +558,31 @@ sub _close_socket
     delete $self->{_rcon_challenge};
     $self->{ready}   = 0;
     $self->{opening} = '';
+
+    # The question on the wire and those not sent yet get no answer (in the order they were asked); the messages
+    # wait for the next challenge
+    $reactor->remove(delete $self->{settle_timer}) if $self->{settle_timer};
+    my @questions;
+    if (my $ask = delete $self->{asking}) {
+        $reactor->remove($ask->{timer});
+        push @questions, $ask->{cb};
+    }
+    my $wire = $self->{wire} || [];
+    $self->{wire} = [];
+    for my $w (@$wire) {
+        my ($command, $cb) = @$w;
+        if ($cb) {
+            push @questions, $cb;
+        } elsif (!$self->{destroyed}) {
+            push @{ $self->{queue} }, [time(), $command];
+        }
+    }
+    shift @{ $self->{queue} } while @{ $self->{queue} } > $QUEUE_MAX;
+    return if $self->{destroyed};
+    my $addr = $self->{addr};
+    for my $cb (@questions) {
+        Mojo::IOLoop->next_tick(sub { _later_call($addr, $cb, undef) });
+    }
 }
 
 sub _send_rcon
@@ -408,6 +638,7 @@ sub _read_multi_packets {
 sub destroy {
     my ($self) = @_;
     $self->{destroyed} = 1;
+    $self->{hold} = 0;
     $self->_close_socket();
     my $reactor = Mojo::IOLoop->singleton->reactor;
     $reactor->remove(delete $self->{retry_timer}) if $self->{retry_timer};
@@ -429,7 +660,57 @@ sub DESTROY
 sub getPlayers
 {
     my ($self) = @_;
-    my $status = $self->execute("status") // '';
+    return $self->_players_of($self->execute("status") // '');
+}
+
+#
+# getPlayers without waiting for the game server: $cb->(%players) is called when it has answered
+#
+sub getPlayers_later
+{
+    my ($self, $cb) = @_;
+    Scalar::Util::weaken(my $weak = $self);
+    return $self->execute_later("status", sub {
+        return unless $weak && $weak->{server_object};
+        $cb->($weak->_players_of($_[0] // ''));
+    });
+}
+
+#
+# getPlayer without waiting for the game server: $cb->($player) is called with the player of that unique id in its
+# answer to "status" (undef when he is not in it, or when there is no answer). Players asked for before the question
+# is sent share its answer.
+#
+sub getPlayer_later
+{
+    my ($self, $uniqueid, $slot_name, $cb) = @_;
+
+    my $round = $self->{player_round};
+    unless ($round && !$round->{sent}) {
+        $round = { sent => 0, waiters => [] };
+        Scalar::Util::weaken(my $weak = $self);
+        my $asked = $self->execute_later("status", sub {
+            my $status = $_[0];
+            $round->{sent} = 1;
+            my %players = ($weak && $weak->{server_object} && $status) ? $weak->_players_of($status) : ();
+            my @waiters = @{ $round->{waiters} };
+            $round->{waiters} = [];
+            for my $w (@waiters) {
+                my ($id, $wcb) = @$w;
+                _later_call($weak ? $weak->{addr} : '', $wcb, ref($players{$id}) eq 'HASH' ? $players{$id} : undef);
+            }
+        }, undef, sub { $round->{sent} = 1 });
+        return 0 unless $asked;
+        $self->{player_round} = $round;
+    }
+    push @{ $round->{waiters} }, [$uniqueid, $cb];
+    return 1;
+}
+
+# The players and the host in the answer to "status"
+sub _players_of
+{
+    my ($self, $status) = @_;
     my $server = "$self->{server_object}->{address}:$self->{server_object}->{port}";
 
     my @lines = split(/[\r\n]+/, $status);
@@ -517,9 +798,14 @@ sub getPlayers
 sub getServerData
 {
   my ($self) = @_;
-  my $status = $self->execute("status") // '';
+  return ($self->server_data_of($self->execute("status") // ''), 0);
+}
 
-  my @lines = split(/[\r\n]+/, $status);
+# The host name, the map and the player slots in the answer to "status"
+sub server_data_of
+{
+  my ($self, $status) = @_;
+  my @lines = split(/[\r\n]+/, $status // '');
 
   my $servhostname         = "";
   my $map         = "";
@@ -539,16 +825,21 @@ sub getServerData
       $max_players = $1;
     }
   }
-  return ($servhostname, $map, $max_players, 0);
+  return ($servhostname, $map, $max_players);
 }
 
 
 sub getVisiblePlayers
 {
   my ($self) = @_;
-  my $status = $self->execute("sv_visiblemaxplayers") // '';
-  
-  my @lines = split(/[\r\n]+/, $status);
+  return $self->visible_of($self->execute("sv_visiblemaxplayers") // '');
+}
+
+# sv_visiblemaxplayers in the game server's answer, -1 when it is not there
+sub visible_of
+{
+  my ($self, $status) = @_;
+  my @lines = split(/[\r\n]+/, $status // '');
   
 
   my $max_players = -1;
@@ -564,6 +855,9 @@ sub getVisiblePlayers
   return ($max_players);
 }
 
+
+# No difficulty for HL1 (Left 4 Dead, on Source servers)
+sub difficulty_of { return 0 }
 
 #
 # Get information about a player by userID

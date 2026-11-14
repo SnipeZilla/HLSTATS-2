@@ -1,0 +1,1462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HLstatsZ profile viewer</title>
+<!--
+  HLstatsZ profile viewer, part of HLstatsZ (https://github.com/SnipeZilla), released under the GNU General Public
+  License v2 or later.
+  Reads hlstatsz_profile.log, written next to this page (the profile folder) by the HLstatsZ daemon when hlstats.conf
+  has "Profile 1" (see hlstatsz_profile.pl, next to hlstats.pl).
+  One file, no internet needed: the log is read in the browser and goes nowhere.
+-->
+<style>
+:root{
+  color-scheme:light;
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7;
+  --border:rgba(11,11,11,.10); --wash:rgba(11,11,11,.04); --dim:rgba(249,249,247,.74);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --de:#b5b4ac;
+  --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
+}
+@media (prefers-color-scheme:dark){:root{
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+  --border:rgba(255,255,255,.10); --wash:rgba(255,255,255,.05); --dim:rgba(13,13,13,.72);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --de:#5f5e5a;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 20px 48px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-bottom:12px}
+h1{font-size:19px;margin:0 auto 0 0;font-weight:650}
+h1 small{display:block;font-size:12.5px;font-weight:400;color:var(--ink2);margin-top:1px}
+button,.btn{font:inherit;border:1px solid var(--border);background:var(--surface);color:var(--ink);padding:5px 11px;border-radius:6px;cursor:pointer}
+button:hover,.btn:hover{background:var(--wash)}
+button:disabled{opacity:.45;cursor:default}
+.btn.primary{background:var(--s1);border-color:transparent;color:#fff;font-weight:600;padding:6px 12px}
+.btn.primary:hover{filter:brightness(1.08)}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+.btn:focus-within,button:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;margin-bottom:14px}
+h2{font-size:19px;margin:0;font-weight:650}
+h3{font-size:14px;margin:0;font-weight:650}
+h3 .over{font-weight:400;color:var(--ink2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.sub{color:var(--ink2);font-size:12.5px;margin:1px 0 8px;max-width:110ch}
+code{font-family:Consolas,"SF Mono",Menlo,monospace;font-size:.93em}
+.mono{font-family:Consolas,"SF Mono",Menlo,monospace;font-size:12px}
+
+/* The period: sticks to the top while the page scrolls */
+.period{position:sticky;top:0;z-index:6;background:var(--page);margin:0 -20px 12px;padding:6px 20px 4px;border-bottom:1px solid var(--grid)}
+@media (max-height:640px),(max-width:700px){.period{position:static}}
+.prow{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.readout{margin-right:auto;font-size:13px;font-variant-numeric:tabular-nums}
+.readout b{font-weight:650}
+.readout span{color:var(--ink2)}
+.prow button{font-size:12.5px;padding:3px 10px}
+#nav{margin-top:2px}
+#nav svg{display:block;touch-action:none;user-select:none;-webkit-user-select:none}
+.nav-bg{fill:var(--surface);stroke:var(--grid)}
+.nav-area{fill:var(--s1);fill-opacity:.16;stroke:var(--s1);stroke-opacity:.55;stroke-width:1}
+.nav-ev{stroke-width:2} .nav-ev.w{stroke:var(--warn)} .nav-ev.c{stroke:var(--crit)}
+.nav-dim{fill:var(--dim);pointer-events:none}
+.nav-win{fill:transparent;stroke:var(--s1);stroke-width:1.5;cursor:grab}
+.nav-win:active{cursor:grabbing}
+.nav-h{cursor:ew-resize}
+.nav-h rect{fill:var(--surface);stroke:var(--s1);stroke-width:1.5}
+.nav-h line{stroke:var(--s1);stroke-width:1}
+.nav-h:focus,.nav-win:focus{outline:none}
+.nav-h:focus-visible rect{stroke-width:3}
+.nav-win:focus-visible{stroke-width:3}
+.nav-start{stroke:var(--muted);stroke-width:1}
+
+/* Verdict and tiles */
+.verdict{display:flex;gap:14px;align-items:flex-start}
+.status{flex:none;display:inline-flex;align-items:center;gap:7px;font-weight:650;font-size:13px;padding:4px 11px 4px 7px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+.status i{width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-style:normal;font-size:12px;font-weight:700}
+.s-good .status i{background:var(--good)} .s-warn .status i{background:var(--warn);color:#0b0b0b} .s-bad .status i{background:var(--crit)} .s-none .status i{background:var(--muted)}
+.verdict p{margin:3px 0 0;max-width:110ch;color:var(--ink2)}
+.verdict p b{color:var(--ink)}
+.verdict ul{margin:6px 0 0;padding-left:18px;max-width:110ch}
+.verdict li{margin:2px 0}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+@media (max-width:900px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;min-width:0}
+.kpi .l{font-size:12.5px;color:var(--ink2)}
+.kpi .v{font-size:24px;font-weight:650;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .v small{font-size:13px;font-weight:500;color:var(--ink2)}
+.kpi .s{font-size:12px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Capacity */
+.caprow{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.capline{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+.capline label{color:var(--ink2);font-size:13px}
+.capline input{font:inherit;width:84px;padding:4px 8px;border:1px solid var(--axis);border-radius:6px;background:var(--surface);color:var(--ink);font-variant-numeric:tabular-nums}
+.capline input:focus-visible{outline:2px solid var(--s1);outline-offset:1px}
+#capout table{width:auto;font-size:13.5px}
+#capout th{white-space:normal;vertical-align:bottom}
+#capout th.n,#capout td.n{padding-left:22px;padding-right:0}
+#capout th small{display:block;font-size:11.5px;white-space:nowrap}
+#capout td.n b{font-size:16px;font-weight:650}
+#capout td small{color:var(--ink2);font-size:12px}
+
+/* Charts */
+.chint{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;margin-bottom:2px}
+.chint .sub{margin:0}
+.chart{margin-top:12px}
+#charts{scroll-margin-top:96px}
+.chead{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;margin-bottom:3px}
+.chead .unit{color:var(--ink2);font-size:12.5px}
+.chead .legend{margin-left:auto}
+.legend{display:flex;flex-wrap:wrap;gap:3px 14px;font-size:12px;color:var(--ink2)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend span[title]{cursor:help}
+.legend i{width:10px;height:10px;border-radius:2px;flex:none}
+.legend i.ln{width:14px;height:2px;border-radius:1px}
+.legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed var(--muted)}
+.legend .hint{color:var(--muted)}
+svg{display:block;max-width:100%}
+svg.tchart{cursor:crosshair;user-select:none;-webkit-user-select:none;touch-action:pan-y}
+.grid{stroke:var(--grid);stroke-width:1}
+.base{stroke:var(--axis);stroke-width:1}
+.ax{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.lbl{fill:var(--ink2);font-size:11.5px}
+.note-in{fill:var(--muted);font-size:12px}
+.cur{stroke:var(--ink2);stroke-width:1;pointer-events:none}
+.sel{fill:var(--s1);opacity:.14;pointer-events:none}
+.startmark{stroke:var(--axis);stroke-width:1}
+.area{fill:var(--s1);fill-opacity:.10} .line{stroke:var(--s1);fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.room{stroke:var(--de);fill:none;stroke-width:1.5;stroke-linejoin:round}
+.dot{fill:var(--s1);stroke:var(--surface);stroke-width:2}
+.dot.froze{fill:var(--crit)}
+.dot.on{stroke:var(--ink)}
+.p-held{fill:var(--de)} .p-perl{fill:var(--s1)} .p-db{fill:var(--s2)} .p-rcon{fill:var(--s3)} .p-sent{fill:var(--s4)} .p-other{fill:var(--s5)}
+.p-rest{fill:var(--de)}
+.pz{fill:var(--de)} .pz.w{fill:var(--warn)} .pz.c{fill:var(--crit)}
+.thr{stroke-width:1;stroke-dasharray:4 3;fill:none} .thr.w{stroke:var(--warn)} .thr.c{stroke:var(--crit)}
+.medl{stroke:var(--ink2);stroke-width:1;stroke-dasharray:2 3;opacity:.7}
+.clip{fill:var(--ink2)}
+.fit{stroke:var(--ink);stroke-width:1.5;fill:none} .fit.ex{stroke-dasharray:5 4;opacity:.65}
+
+/* Lower panels */
+.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-bottom:14px}
+@media (max-width:900px){.cols{grid-template-columns:1fr}}
+.cols .panel{margin-bottom:0}
+.bighead{font-size:16px;font-weight:650;margin:2px 0 8px}
+.bighead span{color:var(--ink2);font-weight:400;font-size:13px}
+.seg{display:flex;gap:2px;height:8px;margin:0 0 10px}
+.seg i{display:block;height:100%;border-radius:4px;min-width:2px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{text-align:left;color:var(--ink2);font-weight:500;border-bottom:1px solid var(--axis);padding:5px 10px 5px 0;white-space:nowrap}
+td{padding:5px 10px 5px 0;border-bottom:1px solid var(--grid);vertical-align:top}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.k{font-family:Consolas,"SF Mono",Menlo,monospace;font-size:12px;word-break:break-word}
+td.k small{color:var(--ink2);font-size:11.5px}
+td .meter{height:6px;border-radius:3px;background:var(--s2);min-width:2px;margin-top:5px}
+td i.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:7px;vertical-align:-1px}
+tr.foot td{color:var(--ink2);border-bottom:0}
+tr.pick{cursor:pointer}
+tr.pick:hover td{background:var(--wash)}
+tr.pick:focus-visible{outline:2px solid var(--s1);outline-offset:-2px}
+tr.on td{background:var(--wash)}
+tr.on td:first-child{box-shadow:inset 3px 0 0 var(--s2)}
+.pill{display:inline-flex;align-items:center;gap:5px;font:600 11.5px/1.6 system-ui,sans-serif;padding:0 8px 0 3px;border-radius:9px;border:1px solid var(--border);white-space:nowrap}
+.pill i{width:14px;height:14px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-style:normal;font-size:10px;color:#fff;background:var(--muted)}
+.pill.c i{background:var(--crit)} .pill.w i{background:var(--warn);color:#0b0b0b}
+.tag{display:inline-block;font:600 11px/1.5 system-ui,sans-serif;padding:0 7px;border-radius:9px;border:1px solid var(--crit);margin-left:6px}
+.tablewrap{overflow-x:auto}
+.more{margin-top:8px}
+details{margin-top:10px}
+details summary{cursor:pointer;color:var(--ink2);font-size:12.5px}
+details .tablewrap{max-height:320px;overflow:auto;margin-top:8px}
+#tip{position:fixed;z-index:10;pointer-events:none;display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;box-shadow:0 6px 20px rgba(0,0,0,.18);min-width:min(210px,calc(100vw - 12px));max-width:min(440px,calc(100vw - 12px))}
+#tip .t{font-weight:650;margin-bottom:1px}
+#tip .t2{color:var(--ink2);margin-bottom:5px}
+#tip .r{display:flex;justify-content:space-between;gap:16px;align-items:baseline}
+#tip .r span{color:var(--ink2);display:inline-flex;align-items:center;gap:6px;min-width:0}
+#tip .r span i{width:12px;height:3px;border-radius:2px;flex:none}
+#tip .r b{font-variant-numeric:tabular-nums;font-weight:650;white-space:nowrap}
+#tip .r.on span{color:var(--ink)}
+#tip .h{color:var(--ink2);margin:6px 0 2px;border-top:1px solid var(--grid);padding-top:5px}
+#tip .k{font-family:Consolas,"SF Mono",Menlo,monospace;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{color:var(--ink2);padding:20px 0;text-align:center}
+.note{color:var(--ink2);font-size:12px;margin-top:8px;max-width:120ch}
+#drop{display:none;position:fixed;inset:0;z-index:20;background:rgba(42,120,214,.16);border:4px dashed var(--s1);align-items:center;justify-content:center;font-size:22px;font-weight:650}
+body.dragging #drop{display:flex}
+#start{padding:34px 28px}
+#start ol{margin:14px 0 16px;padding-left:22px;max-width:86ch}
+#start li{margin:8px 0}
+#start p{color:var(--ink2);max-width:86ch;margin:0}
+footer{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
+@media (max-width:640px){
+  .wrap{padding:14px 16px 40px}
+  .period{margin:0 -16px 12px;padding:6px 16px 4px}
+  .verdict{flex-direction:column;gap:8px}
+  .kpi .v{font-size:20px}
+  .chead .legend{margin-left:0}
+}
+</style>
+</head>
+<body>
+<div id="drop">Drop the profile log here</div>
+<div id="tip" role="tooltip"></div>
+<div class="wrap">
+  <header>
+    <h1>HLstatsZ profile viewer<small id="src">How the daemon copes with its load</small></h1>
+    <label class="btn primary">Open log…<input type="file" id="file" accept=".log,.txt,text/plain" multiple></label>
+  </header>
+
+  <section id="start" class="panel">
+    <h2>See how your HLstatsZ daemon copes with its load</h2>
+    <ol>
+      <li>In <code>hlstats.conf</code>, set <code>Profile 1</code> and restart HLstatsZ.</li>
+      <li>Let it run while your game servers are busy. The daemon writes <code>hlstatsz_profile.log</code> in the <code>profile</code> folder, next to this page.</li>
+      <li>Click <b>Open log…</b> and pick it in that folder, or drop it on this page. If there is also a <code>hlstatsz_profile.old.log</code>, open both together to see further back.</li>
+      <li>When you are done, set <code>Profile 0</code> and restart HLstatsZ.</li>
+    </ol>
+    <p>The log is read in your browser and goes nowhere: this page works without internet. The two log files together never take more than about 10 MB.</p>
+  </section>
+
+  <main id="main" hidden>
+    <div class="period" id="period">
+      <div class="prow">
+        <span class="readout" id="readout"></span>
+        <button id="bAll" type="button">Whole log</button>
+        <button id="bPeak" type="button">Busiest hour</button>
+        <button id="bLast" type="button">Last hour</button>
+      </div>
+      <div id="nav"></div>
+    </div>
+
+    <section id="verdict" class="panel verdict"></section>
+    <section id="kpis" class="kpis"></section>
+
+    <section class="panel" id="cap">
+      <h3>Capacity<span class="over" data-over="top"></span></h3>
+      <div class="sub" id="capsub"></div>
+      <div class="caprow">
+        <div class="capline">
+          <label for="per">Lines a second from one busy server</label>
+          <input type="number" id="per" min="0.1" step="any" inputmode="decimal">
+        </div>
+        <div class="tablewrap" id="capout"></div>
+      </div>
+      <div class="note" id="capnote"></div>
+    </section>
+
+    <section class="panel" id="charts">
+      <div class="chint"><h3>Timeline<span class="over" data-over="top"></span></h3><span class="sub" id="chsub"></span></div>
+      <div id="chartlist"></div>
+      <details id="tv"><summary>Show these charts as a table</summary><div class="tablewrap" id="tvt"></div></details>
+    </section>
+
+    <div class="cols">
+      <section class="panel" id="budget">
+        <h3>Time budget<span class="over" data-over="low"></span></h3>
+        <div class="sub" id="budsub"></div>
+        <div id="bud"></div>
+      </section>
+      <section class="panel">
+        <h3>Busy against load<span class="over" data-over="low"></span></h3>
+        <div class="sub">One dot per 5-s interval. The line is the cost of a line under load; it reaches 100% at the ceiling.</div>
+        <div id="sc"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h3>Database statements<span class="over" data-over="low"></span></h3>
+      <div class="sub">Click one to follow it on the Database chart. The profiler lists the 8 heaviest statements of each interval, so small ones are undercounted.</div>
+      <div class="tablewrap" id="stm"></div>
+    </section>
+
+    <section class="panel">
+      <h3>Pauses and events<span class="over" data-over="low"></span></h3>
+      <div class="sub" id="evsub">The daemon runs one event loop for every game server: during a pause, no server's lines are handled. They wait in the UDP buffer and are handled after. Click a row to zoom on it.</div>
+      <div class="tablewrap" id="ev"></div>
+    </section>
+  </main>
+  <footer>HLstatsZ profile viewer · reads the hlstatsz_profile.log next to it (Profile 1 in hlstats.conf) · works offline</footer>
+</div>
+
+<script>
+'use strict';
+//<pure>
+// ---------------------------------------------------------------------------------------------------------------------
+// Reading the log
+// ---------------------------------------------------------------------------------------------------------------------
+const DEF_INTERVAL = 5;         // seconds between two lines of the profiler
+const FREEZE_MS    = 1000;      // the daemon did nothing else for this long: a freeze
+const HICCUP_MS    = 250;       // a pause the profiler always reports (it writes a line for it, even with no load)
+const PAUSE_MS     = 100;       // from this long, the part of a pause that no timed work explains is counted
+const RCON_WAIT_MS = 2000;      // TRcon and BASTARDrcon give up on an answer after 2 s
+const RE_LINE = /^(?:(\d{4})-(\d\d)-(\d\d) )?(\d\d):(\d\d):(\d\d) (.*)$/;
+const RE_KV   = /(\w+)=(-?\d+(?:\.\d+)?)(?:ms|s)?(?: \((\d+) calls\))?/g;
+
+// The lines of one file, as items: start, stop, idle, data
+function parseLog(text) {
+  const items = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const m = RE_LINE.exec(raw.trim());
+    if (!m) continue;
+    const it = { date: m[1] ? `${m[1]}-${m[2]}-${m[3]}` : '', time: `${m[4]}:${m[5]}:${m[6]}`, sod: +m[4] * 3600 + +m[5] * 60 + +m[6] };
+    it.abs = m[1] ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / 1000 + it.sod : null;
+    const rest = m[7];
+    let k;
+    if (/^stop\b/.test(rest)) it.kind = 'stop';
+    else if (/^start\b/.test(rest)) {
+      it.kind = 'start';
+      const g = re => (re.exec(rest) || [])[1];
+      it.info = { version: g(/HLstatsZ (\S+)/), interval: +g(/interval=(\d+(?:\.\d+)?)s/) || DEF_INTERVAL, debug: g(/debug=(\d+)/),
+                  os: g(/os=(\S+)/), perl: g(/perl=([\d.]+)/) };
+    } else if ((k = /^idle (\d+(?:\.\d+)?)s/.exec(rest))) { it.kind = 'idle'; it.secs = +k[1]; }
+    else if (rest.indexOf('lines=') >= 0) {
+      it.kind = 'data';
+      const cut = rest.search(/ ::(?: |$)/);
+      const head = cut < 0 ? rest : rest.slice(0, cut), tail = cut < 0 ? '' : rest.slice(cut + 4);
+      const f = {}, c = {};
+      RE_KV.lastIndex = 0;
+      while ((k = RE_KV.exec(head))) { f[k[1]] = +k[2]; if (k[3] != null) c[k[1]] = +k[3]; }
+      it.f = f; it.c = c; it.stmts = [];
+      if (tail) for (const p of tail.split(' | ')) { const s = /^(.*) n=(\d+) (\d+)ms$/.exec(p.trim()); if (s) it.stmts.push({ k: s[1], n: +s[2], ms: +s[3] }); }
+    } else continue;
+    items.push(it);
+  }
+  return items;
+}
+
+function blankRow(it, dt, session) {
+  return { date: it.date, time: it.time, abs: it.abs, dt, v: 2, idle: true, session, lines: 0, total: null, handle: 0, timer: 0, db: 0, dbCalls: 0,
+           rcon: 0, rconCalls: 0, sent: 0, sentCalls: 0, lookup: 0, lookupCalls: 0, out: 0, outCalls: 0, busy: 0, cpu: null, stall: 0, late: 0, stmts: [],
+           servers: null, players: null, slots: null, top: null };
+}
+function clock(abs) { const s = ((abs % 86400) + 86400) % 86400, p = n => String(Math.floor(n)).padStart(2, '0'); return `${p(s / 3600)}:${p(s % 3600 / 60)}:${p(s % 60)}`; }
+function day(abs) { return new Date(abs * 1000).toISOString().slice(0, 10); }
+
+// Items to rows: one row per interval. An "idle" line becomes as many empty intervals as it stands for.
+function buildRows(items) {
+  const rows = [];
+  let session = { interval: DEF_INTERVAL }, pending = null, stopped = null, any = false, prev = null, v1day = 0;
+  for (const it of items) {
+    if (it.kind === 'start') {
+      // clean: the run before it ended with a "stop" line (null: not known, the log begins here or the first profiler wrote it)
+      session = Object.assign({}, it.info, { clean: any && !(prev && prev.v === 1) ? stopped === true : null });
+      pending = session; stopped = false; any = true;
+      continue;
+    }
+    any = true;
+    if (it.kind === 'stop') { stopped = true; continue; }
+    stopped = false;
+    const from = rows.length;
+    if (it.kind === 'idle') {
+      const n = Math.max(1, Math.round(it.secs / session.interval)), dt = it.secs / n;
+      for (let i = 0; i < n; i++) {
+        const r = blankRow(it, dt, session);
+        if (it.abs != null) { r.abs = it.abs - (n - 1 - i) * dt; r.time = clock(r.abs); r.date = day(r.abs); }
+        rows.push(r);
+      }
+    } else {
+      const f = it.f, c = it.c, v = it.abs != null && f.dt != null ? 2 : 1;
+      const r = { date: it.date, time: it.time, abs: it.abs, v, idle: false, session, lines: f.lines || 0, total: f.total == null ? null : f.total,
+                  handle: f.handle || 0, timer: f.timer || 0, db: f.db || 0, dbCalls: c.db || 0, rcon: f.rcon || 0, rconCalls: c.rcon || 0,
+                  sent: f.rcon_sent || 0, sentCalls: c.rcon_sent || 0, lookup: f.lookup || 0, lookupCalls: c.lookup || 0, out: f.out || 0, outCalls: c.out || 0,
+                  busy: f.busy == null ? null : f.busy, cpu: f.cpu == null ? null : f.cpu, stall: f.stall == null ? null : f.stall, stmts: it.stmts,
+                  servers: f.servers == null ? null : f.servers, players: f.players == null ? null : f.players, slots: f.slots == null ? null : f.slots,
+                  top: f.top == null ? null : f.top };
+      if (v === 2) {
+        r.dt = f.dt > 0 ? f.dt : session.interval;
+        r.late = Math.max(0, r.dt - session.interval);
+      } else {
+        // The first profiler wrote the time only, and no interval: both are worked out from the line before
+        if (prev && prev.v === 1 && it.sod < prev.sod1) v1day++;
+        r.sod1 = it.sod; r.abs = v1day * 86400 + it.sod;
+        let gap = DEF_INTERVAL;
+        if (prev && prev.v === 1) {
+          const d = r.abs - prev.abs;
+          if (r.total < prev.total || d > 300 || (d >= DEF_INTERVAL + 2 && r.total === r.lines)) pending = pending || { interval: DEF_INTERVAL, clean: null, guessed: true };
+          else if (d >= DEF_INTERVAL + 2) gap = d;
+        } else if (prev) pending = pending || { interval: DEF_INTERVAL, clean: null, guessed: true };
+        if (pending && pending.guessed) session = pending;
+        r.session = session; r.dt = gap; r.late = gap - DEF_INTERVAL;
+      }
+      rows.push(r);
+    }
+    if (pending) { rows[from].start = pending; pending = null; }
+    prev = rows[rows.length - 1];
+  }
+  rows.forEach(derive);
+  return rows;
+}
+
+// What each interval was made of, in ms. Only what the profiler measured to the millisecond goes in: the processor
+// time ("cpu") and the shortest pause ("stall") move in steps of the system clock (15.6 ms on Windows, 10 ms on
+// Linux), far more than the daemon does in most intervals, so they are only used added up over many of them.
+function derive(r) {
+  const known = r.db + r.rcon + r.sent + r.lookup + r.out;
+  if (r.v === 2) {
+    r.busy    = Math.max(r.busy || 0, known);
+    r.perl    = Math.max(0, r.busy - known);                              // the daemon's own Perl code
+    r.stallMs = r.stall || 0;
+    r.unacc   = r.stallMs >= PAUSE_MS ? Math.max(0, r.stallMs - r.busy) : 0; // a long pause no timed work explains
+  } else {
+    r.busy  = Math.max(r.handle + r.timer, known);
+    r.perl  = Math.max(0, r.busy - known);
+    r.unacc = r.start ? 0 : Math.max(0, r.late * 1000 - r.busy);
+    let longest = r.start ? 0 : r.late * 1000;
+    if (r.rconCalls) longest = Math.max(longest, r.rcon / r.rconCalls);
+    for (const s of r.stmts) longest = Math.max(longest, s.ms / s.n);
+    r.stallMs = longest;                                                   // at least this long
+  }
+  r.recv   = 0;                                                            // receiving the lines: see lineOverhead
+  r.other  = r.lookup + r.out;
+  r.rate   = r.dt > 0 ? r.lines / r.dt : 0;
+  r.frozen = r.stallMs >= FREEZE_MS;
+  r.hiccup = r.stallMs >= HICCUP_MS;
+  occupy(r);
+}
+// The time the daemon could not take a line, and its share of the interval
+function occupy(r) {
+  r.occ = r.busy + r.recv + r.unacc;
+  r.pct = r.dt > 0 ? Math.min(100, r.occ / (r.dt * 10)) : 0;
+}
+
+function median(a) { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
+
+// Least squares for a few unknowns (Gauss, partial pivot). null when the columns do not tell them apart.
+function leastSquares(X, Y) {
+  const k = X[0].length, M = Array.from({ length: k }, () => new Array(k + 1).fill(0));
+  for (let i = 0; i < X.length; i++) for (let a = 0; a < k; a++) { M[a][k] += X[i][a] * Y[i]; for (let b = 0; b < k; b++) M[a][b] += X[i][a] * X[i][b]; }
+  for (let c = 0; c < k; c++) {
+    let p = c; for (let r = c + 1; r < k; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    if (!(Math.abs(M[p][c]) > 1e-9 * (1 + Math.abs(M[c][c])))) return null;
+    [M[c], M[p]] = [M[p], M[c]];
+    for (let r = 0; r < k; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let b = c; b <= k; b++) M[r][b] -= f * M[c][b]; }
+  }
+  return M.map((row, c) => row[k] / row[c]);
+}
+
+// What receiving a log line costs outside the timed work (the UDP socket and the event loop), in ms. The profiler
+// times what the daemon does with a line, not the receiving of it: this is the part of the processor time that the
+// timed work does not explain and that grows with the lines, minute by minute over the log. null when the log cannot
+// tell: no processor time (the first profiler), too few minutes of it, or a load that hardly changes.
+function lineOverhead(rows) {
+  const G = [];
+  let g = null;
+  for (const r of rows) {
+    if (r.v !== 2 || r.cpu == null) { g = null; continue; }
+    if (!g || r.start) g = { y: 0, t: 0, l: 0, w: 0, n: 0 };
+    g.y += r.cpu - r.perl - r.out;                      // processor time outside the daemon's own timed code
+    g.t += r.dt; g.l += r.lines; g.w += r.db + r.rcon + r.sent + r.lookup;   // waits use a little processor time too
+    if (++g.n === 12) { G.push(g); g = null; }
+  }
+  if (G.length < 30) return null;
+  const rates = G.map(x => x.l / x.t), mean = rates.reduce((s, v) => s + v, 0) / rates.length;
+  const sd = Math.sqrt(rates.reduce((s, v) => s + (v - mean) ** 2, 0) / rates.length);
+  if (!(mean > 0) || sd / mean < 0.25) return null;
+  const Y = G.map(x => x.y);
+  const sol = leastSquares(G.map(x => [x.t, x.l, x.w]), Y) || leastSquares(G.map(x => [x.t, x.l]), Y);
+  if (!sol || !isFinite(sol[1]) || sol[1] > 2) return null;
+  return Math.max(0, sol[1]);
+}
+function applyOverhead(rows, perLine) {
+  for (const r of rows) { r.recv = perLine && r.v === 2 ? perLine * r.lines : 0; occupy(r); }
+}
+
+// Players: the profiler counts the players of the game servers that sent lines in an interval. A quiet server sends
+// nothing for a few seconds, so the count shown is the highest of the last 30 seconds (and so are its slots and servers).
+function smoothPlayers(rows, back = 6) {
+  for (let i = 0; i < rows.length; i++) {
+    let best = null;
+    for (let j = i; j > i - back && j >= 0; j--) {
+      if (j < i && rows[j + 1].start) break;               // not across a start of the daemon
+      const r = rows[j];
+      if (r.players != null && !r.idle && (!best || r.players > best.players)) best = r;
+    }
+    const r = rows[i];
+    r.pl = best ? best.players : null;
+    r.sl = best && best.slots > 0 ? best.slots : null;
+    r.sv = best ? best.servers : null;
+  }
+}
+
+const CAUSE = {
+  rcon:       'waiting for a game server to answer RCON',
+  connect:    'opening an RCON connection to a game server',
+  db:         'in the database',
+  lookup:     'in a lookup (GeoIP, DNS or the query of a new server)',
+  out:        'writing its own output (DebugLevel)',
+  unmeasured: 'held up outside all the timed work (the machine, or code the profiler does not time)',
+  code:       'in its own Perl code (no database, RCON or lookup in it)',
+  v1code:     'while handling lines, on something that is neither the database nor RCON',
+};
+// What a long pause was spent on. Messages sent without waiting ("rcon_sent") are quick: when they take long, the
+// connection was being opened first (the first contact with a game server waits for it, 2 s at most)
+function freezeCause(r) {
+  const parts = [['rcon', r.rcon], ['connect', r.sent], ['db', r.db], ['lookup', r.lookup], ['out', r.out]].sort((a, b) => b[1] - a[1]);
+  if (parts[0][1] >= 0.5 * r.stallMs) return parts[0][0];
+  if (r.unacc >= 0.5 * r.stallMs) return 'unmeasured';
+  return r.v === 2 ? 'code' : 'v1code';
+}
+
+// How often a statement shows up: the usual gap between two intervals that list it, and whether the gaps are regular
+function cadence(at) {
+  if (at.length < 4) return null;
+  const gaps = [];
+  for (let i = 1; i < at.length; i++) gaps.push(at[i] - at[i - 1]);
+  const every = median(gaps);
+  if (!(every > 0)) return null;
+  const near = gaps.filter(g => Math.abs(g - every) <= Math.max(0.15 * every, DEF_INTERVAL + 0.1)).length / gaps.length;
+  return { every, regular: near >= 0.6 };
+}
+
+// Everything the page says about a period
+function analyze(rows, perLine = null) {
+  const A = { n: rows.length, lines: 0, secs: 0, events: [], freezes: [], hiccups: [], slowRcon: [], starts: [], killed: 0, hasCpu: false, perLine,
+              tot: { perl: 0, recv: 0, sent: 0, db: 0, rcon: 0, lookup: 0, out: 0, unacc: 0, occ: 0, busy: 0, cpu: 0, cpuSecs: 0 },
+              calls: { db: 0, rcon: 0, sent: 0, lookup: 0, out: 0 } };
+  const stm = new Map();
+  let peak = null, worst = null, loadPerl = 0, loadCpu = 0;
+  rows.forEach((r, i) => {
+    A.lines += r.lines; A.secs += r.dt;
+    for (const k of ['perl', 'recv', 'sent', 'db', 'rcon', 'lookup', 'out', 'unacc', 'occ', 'busy']) A.tot[k] += r[k];
+    A.calls.db += r.dbCalls; A.calls.rcon += r.rconCalls; A.calls.sent += r.sentCalls; A.calls.lookup += r.lookupCalls; A.calls.out += r.outCalls;
+    if (r.cpu != null) { A.hasCpu = true; A.tot.cpu += r.cpu; A.tot.cpuSecs += r.dt; }
+    if (!peak || r.rate > peak.rate) peak = r;
+    if (!r.frozen && r.lines > 0 && (!worst || r.pct > worst.pct)) worst = r;
+    if (r.lines >= 50 && r.cpu != null) { loadPerl += r.perl; loadCpu += r.cpu; }
+    let slowest = null;
+    for (const s of r.stmts) {
+      let a = stm.get(s.k); if (!a) stm.set(s.k, a = { k: s.k, n: 0, ms: 0, worst: 0, iv: 0, at: [] });
+      a.n += s.n; a.ms += s.ms; a.iv++; if (r.abs != null) a.at.push(r.abs);
+      const avg = s.ms / s.n; if (avg > a.worst) a.worst = avg;
+      if (!slowest || avg > slowest.avg) slowest = { k: s.k, avg };
+    }
+    // Worth listing: a start, a pause of HICCUP_MS or more, a slow game server, a slow query
+    const e = { r, what: [], kind: null, cause: null, slowest: null, slowQ: [] };
+    if (r.start && (i > 0 || r.start.clean === false)) {
+      A.starts.push(r); if (r.start.clean === false) A.killed++;
+      e.kind = 'start';
+      e.what.push('HLstatsZ started' + (r.start.version ? ' (version ' + r.start.version + ')' : '') +
+                  (r.start.clean === false ? '. The run before it did not stop normally: it was ended by force, or it crashed' : ''));
+    }
+    if (r.hiccup) {
+      e.kind = r.frozen ? 'freeze' : 'hiccup'; e.cause = freezeCause(r); e.slowest = slowest;
+      (r.frozen ? A.freezes : A.hiccups).push({ r, cause: e.cause });
+      const secs = r.stallMs >= 1000 ? (r.stallMs / 1000).toFixed(1) + ' s' : Math.round(r.stallMs) + ' ms';
+      e.what.push((r.v === 2 ? `Stopped ${secs} ` : `Stopped at least ${secs} `) + CAUSE[e.cause] +
+                  (e.cause === 'db' && slowest ? ' (' + slowest.k + ')' : '') + (e.cause === 'rcon' ? `: ${Math.round(r.rcon)} ms for ${r.rconCalls} commands` : ''));
+    }
+    if (r.rconCalls && r.rcon / r.rconCalls >= 500) { A.slowRcon.push(r); if (e.cause !== 'rcon') e.what.push(`Slow answer from a game server (RCON): ${Math.round(r.rcon)} ms for ${r.rconCalls} commands`); }
+    for (const s of r.stmts) if (s.ms / s.n >= 200) { e.slowQ.push(s); if (!(e.cause === 'db' && slowest && slowest.k === s.k)) e.what.push(`Slow query: ${s.k} took ${Math.round(s.ms / s.n)} ms`); }
+    if (e.what.length) { if (!e.kind) e.kind = e.slowQ.length ? 'slowq' : 'slowrcon'; A.events.push(e); }
+  });
+  A.pauses = A.freezes.length + A.hiccups.length;
+  A.peak = peak; A.worst = worst;
+  A.info = rows.length ? rows[rows.length - 1].session : null;
+  A.busyShare = A.secs ? A.tot.occ / (A.secs * 10) : 0;
+
+  // Time per line under load, and the ceiling it gives. With too little load for that, every interval that had lines
+  // counts, fixed work included: the ceiling is then a low estimate (rough)
+  const act = rows.filter(r => r.lines >= 50 && !r.hiccup), half = peak ? peak.rate / 2 : 0, cost = r => r.occ / r.lines;
+  const heavy = act.filter(r => r.rate >= half);
+  A.rough = heavy.length < 3;
+  if (A.rough) {
+    let l = 0, o = 0;
+    for (const r of rows) if (r.lines > 0 && !r.hiccup && r.rate >= half) { l += r.lines; o += r.occ; }
+    A.costHeavy = l ? o / l : NaN; A.costLight = NaN;
+  } else {
+    A.costHeavy = median(heavy.map(cost));
+    A.costLight = median(act.filter(r => r.rate < half).map(cost));
+  }
+  A.capacity = 1000 / A.costHeavy;
+
+  // The game servers behind the load (the first profilers did not count them)
+  const per = [], sized = []; let sMax = 0, pMax = 0, top = 0, pl = 0, ps = 0, fill = 0;
+  for (const r of rows) {
+    if (!(r.servers > 0) || !r.lines) continue;
+    per.push(r.rate / r.servers);
+    if (r.servers > sMax) sMax = r.servers;
+    if (r.players > pMax) pMax = r.players;
+    if (r.top / r.dt > top) top = r.top / r.dt;
+    if (r.players > 0) { pl += r.lines; ps += r.players * r.dt; }
+    if (r.players > 0 && r.slots >= r.players) { sized.push(r); if (r.players / r.slots > fill) fill = r.players / r.slots; }
+  }
+  const p90 = a => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * 0.9))]; };
+  A.srv = per.length ? { max: sMax, players: pMax, busy: p90(per), top, perPlayer: ps ? pl / ps : 0, fill: 0, size: 0, full: 0 } : null;
+  // What a full server would send, when the log says how many players the servers have room for: the lines a second of
+  // each player while the servers were at their fullest (a minute of it at least), times the slots of a server
+  const fullest = sized.filter(r => r.players >= Math.max(4, pMax / 2));
+  if (A.srv && fullest.length >= 12) {
+    let slots = 0, servers = 0;
+    for (const r of fullest) { slots += r.slots; servers += r.servers; }
+    A.srv.fill = fill; A.srv.size = slots / servers; A.srv.full = p90(fullest.map(r => r.rate / r.players)) * A.srv.size;
+  }
+  A.stmts = [...stm.values()].sort((a, b) => b.ms - a.ms);
+  for (const s of A.stmts) s.cadence = cadence(s.at);
+  A.slowStm = A.stmts.filter(s => s.ms / s.n >= 100);
+  // Its own code took longer than the processor time the whole daemon got: it was waiting for the processor
+  A.starvedShare = loadPerl >= 500 && loadPerl > loadCpu ? (loadPerl - loadCpu) / loadPerl : 0;
+
+  const live = rows.filter(r => !r.frozen && r.lines > 0), active = rows.filter(r => r.lines >= 10).length;
+  A.hot  = live.filter(r => r.pct >= 90).length;
+  A.warm = live.filter(r => r.pct >= 70).length;
+  A.oftenFrozen = A.freezes.length >= Math.max(5, 0.05 * active);
+  if (!peak || A.lines < 20 || !isFinite(A.costHeavy) || !(A.costHeavy > 0) || !worst) A.status = 'none';
+  else {
+    // A line that costs more as the load rises only matters once the daemon is fairly busy: at a few percent, a burst
+    // of heavier lines (a round that ends and saves every player) does the same
+    A.growth = isFinite(A.costLight) && A.costLight > 0 ? A.costHeavy / A.costLight : 1;
+    A.scaling = A.growth > 1.3 && peak.pct >= 25;
+    A.status = A.hot >= 3 ? 'bad' : (A.hot >= 1 || A.warm >= 3 || A.scaling || A.oftenFrozen) ? 'warn' : 'good';
+  }
+  return A;
+}
+
+// Several files: the old log before the log
+function mergeFiles(files) {
+  const parsed = files.map(f => ({ name: f.name, items: parseLog(f.text) })).filter(p => p.items.length);
+  const first = p => (p.items.find(it => it.abs != null) || {}).abs;
+  parsed.sort((a, b) => {
+    const x = first(a), y = first(b);
+    if (x != null && y != null && x !== y) return x - y;
+    return (/\.old\./i.test(b.name) ? 1 : 0) - (/\.old\./i.test(a.name) ? 1 : 0);
+  });
+  const rows = buildRows([].concat(...parsed.map(p => p.items)));
+  smoothPlayers(rows);
+  const perLine = lineOverhead(rows);
+  applyOverhead(rows, perLine);
+  return { names: parsed.map(p => p.name), rows, perLine };
+}
+//</pure>
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The page
+// ---------------------------------------------------------------------------------------------------------------------
+const $  = s => document.querySelector(s);
+const f0 = n => Math.round(n).toLocaleString('en-US');
+const f1 = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const f2 = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const round100 = n => n >= 1000 ? Math.round(n / 100) * 100 : n >= 100 ? Math.round(n / 10) * 10 : Math.round(n);
+const plural = (n, w) => f0(n) + ' ' + w + (Math.round(n) === 1 ? '' : 's');
+const times = n => n >= 10 ? f0(n) : f1(n);
+const small = v => v < 10 ? f1(v) : f0(v);
+const pct = v => v > 0 && v < 0.1 ? f2(v) : v < 10 ? f1(v) : f0(v);
+// A time in ms: 0.4 ms, 80 ms, 2.3 s
+const ms = v => v >= 1000 ? f1(v / 1000) + ' s' : v >= 10 || v === 0 ? f0(v) + ' ms' : f1(v) + ' ms';
+// A length of time in seconds: 8.5 s, 45 s, 1 min 7 s, 12 min, 9 h 53 min
+function dur(s) {
+  if (s < 59.5) return s < 9.95 ? f1(s) + ' s' : f0(s) + ' s';
+  if (s < 3570) { const t = Math.round(s), m = Math.floor(t / 60), r = t - m * 60; return m + ' min' + (r && m < 10 ? ' ' + r + ' s' : ''); }
+  const t = Math.round(s / 60), h = Math.floor(t / 60), m = t - h * 60;
+  return h + ' h' + (m ? ' ' + m + ' min' : '');
+}
+// How often: 15 s, 1.4 min, 5 min, 2.5 h
+function every(s) {
+  if (s < 59.5) return f0(s) + ' s';
+  const m = s / 60;
+  if (s < 3570) return (Math.abs(m - Math.round(m)) < 0.05 || m >= 10 ? f0(m) : f1(m)) + ' min';
+  return f1(s / 3600) + ' h';
+}
+// A value axis from 0 with round steps (1, 2, 2.5 or 5 times a power of ten), in 3 to 5 divisions
+function axis(v) {
+  if (!(v > 0)) v = 1;
+  const raw = v / 4, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p, step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+  const n = Math.max(1, Math.ceil(v / step - 1e-9));
+  return { max: step * n, step, n };
+}
+const tick = (v, step) => step >= 1 ? f0(v) : step >= 0.1 ? f1(v) : f2(v);
+// Text from the log (statement names, versions) only ever enters the page as text
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  if (props) for (const k in props) { if (k === 'class') e.className = props[k]; else if (k === 'style') e.style.cssText = props[k]; else e.setAttribute(k, props[k]); }
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return e;
+}
+const B = t => el('b', null, t);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// "get_total_player_counts [SELECT hlstats_Players]": its name, and what it does
+const splitName = k => { const m = /^(.*?) \[(.*)\]$/.exec(k); return m ? [m[1], m[2]] : [k, '']; };
+const shortName = k => splitName(k)[0];
+
+// What the busy time is made of, from the baseline up. Its own code includes receiving the lines (estimated).
+const PARTS = [
+  ['unacc', 'p-held',  'Held up, not timed', 'A pause of 100 ms or more that no timed work explains: the machine, or code the profiler does not time'],
+  ['perl',  'p-perl',  'Perl code',          'The daemon\'s own code: handling the lines, its timers, and receiving the lines (estimated from the processor time)'],
+  ['db',    'p-db',    'Database',           'SQL statements'],
+  ['rcon',  'p-rcon',  'RCON, waiting',      'Commands that wait for the game server\'s answer: 2 s at most'],
+  ['sent',  'p-sent',  'RCON, sending',      'Messages sent without waiting for an answer. Long only when the connection is opened first (2 s at most)'],
+  ['other', 'p-other', 'Lookups & output',   'GeoIP, DNS, the query of a new game server, and the DebugLevel output'],
+];
+const PCOLOR = { 'p-held': 'var(--de)', 'p-perl': 'var(--s1)', 'p-db': 'var(--s2)', 'p-rcon': 'var(--s3)', 'p-sent': 'var(--s4)', 'p-other': 'var(--s5)' };
+const LEGEND_ORDER = ['perl', 'db', 'rcon', 'sent', 'other', 'unacc'];
+const partVal = (r, key) => key === 'perl' ? r.perl + r.recv : r[key];
+const SHORT = { rcon: 'waiting for an RCON answer', connect: 'opening an RCON connection', db: 'in the database', lookup: 'in a lookup', out: 'writing output',
+                unmeasured: 'held up, not timed', code: 'in its own code', v1code: 'handling lines' };
+
+const CHARTS = [
+  { id: 'load',  title: 'Load',     unit: 'log lines a second' },
+  { id: 'pl',    title: 'Players',  unit: 'on the game servers that sent lines' },
+  { id: 'busy',  title: 'Busy',     unit: 'ms of work in each @' },
+  { id: 'db',    title: 'Database', unit: 'ms in each @' },
+  { id: 'rcon',  title: 'RCON',     unit: 'ms in each @' },
+  { id: 'pause', title: 'Pauses',   unit: 'longest stop of the event loop in each @, log scale' },
+];
+
+let ALL = [], NAMES = [], PERLINE = null, R0 = 0, R1 = 0, dated = false, manyDays = false, ASSUME = null, LAST = null, SEL = null, STM_ALL = false;
+let VIEW = null, hover = null, drag = null, raf = 0, NAVG = null, navMode = null;
+const when = r => (manyDays && r.date ? r.date.slice(5) + ' ' : '') + r.time;
+const intervalOf = A => (A && A.info && A.info.interval) || DEF_INTERVAL;
+const minRows = () => Math.min(12, ALL.length);
+const selMs = r => { if (!SEL) return 0; for (const s of r.stmts) if (s.k === SEL) return s.ms; return 0; };
+
+function show(files) {
+  const merged = mergeFiles(files);
+  if (!merged.rows.length) { alert('No profiler lines found in ' + files.map(f => f.name).join(', ') + '.'); return; }
+  ALL = merged.rows; NAMES = merged.names; PERLINE = merged.perLine;
+  ALL.forEach((r, i) => { r.ix = i; });
+  R0 = 0; R1 = ALL.length - 1; ASSUME = null; SEL = null; STM_ALL = false;
+  dated = ALL.every(r => r.date);
+  manyDays = dated && ALL[0].date !== ALL[ALL.length - 1].date;
+  $('#start').hidden = true; $('#main').hidden = false;
+  let secs = 0; for (const r of ALL) secs += r.dt;
+  $('#bPeak').disabled = $('#bLast').disabled = secs < 3600 * 1.05;
+  renderNav();
+  render();
+}
+
+function scheduleRender() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); }
+
+function render() {
+  const rows = ALL.slice(R0, R1 + 1), A = analyze(rows, PERLINE), a = rows[0], b = rows[rows.length - 1];
+  LAST = A;
+  const info = A.info && A.info.version ? ` · HLstatsZ ${A.info.version}` + (A.info.os ? ` on ${A.info.os === 'MSWin32' ? 'Windows' : A.info.os}` : '') : '';
+  $('#src').textContent = NAMES.join(' + ') + ' · ' + plural(ALL.length, 'interval') + info;
+  const zoomed = R0 > 0 || R1 < ALL.length - 1;
+  $('#readout').replaceChildren(B(when(a)), ' → ', B(when(b)), el('span', null, ` · ${dur(A.secs)} · ${plural(A.lines, 'line')} · ${zoomed ? 'zoomed' : 'whole log'}`));
+  updateNav();
+  // Each panel's heading says how long a period it covers: the one chosen above (its times on hover)
+  const over = ` → over ${dur(A.secs)}`, span = `${when(a)} → ${when(b)}`;
+  const setOver = which => { for (const s of document.querySelectorAll(`.over[data-over="${which}"]`)) { s.textContent = over; s.title = span; } };
+  setOver('top');
+  renderVerdict(A); renderKpis(A, rows); renderCapacity(A); renderCharts(rows, A);
+  // While a handle of the period is dragged, the panels below the charts wait for it to be let go
+  if (navMode) return;
+  setOver('low');
+  renderBudget(A, zoomed); renderScatter(rows, A); renderStmts(A); renderEvents(A);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The summary: verdict, tiles, capacity
+// ---------------------------------------------------------------------------------------------------------------------
+function renderVerdict(A) {
+  const box = $('#verdict'), pk = A.peak;
+  let label, icon, head; const p = el('p');
+  if (A.status === 'none') {
+    label = 'No verdict'; icon = '?'; head = 'No load in this period';
+    p.append(`The daemon handled ${plural(A.lines, 'log line')} here. Leave the profiler on while the game servers are busy, then open the log again.`);
+  } else {
+    p.append('Peak ', B(small(pk.rate) + ' lines/s'), ` at ${when(pk)}, busy `, B(pct(pk.pct) + '%'), ' of the time. A line costs about ', B(f2(A.costHeavy) + ' ms'),
+             A.rough ? ', so the ceiling is at least ' : ', so the ceiling is near ', B(f0(round100(A.capacity)) + ' lines/s'),
+             A.capacity / pk.rate >= 1.15 ? `, ${times(A.capacity / pk.rate)}× the peak.` : ', about the peak.');
+    if (A.status === 'good') { label = 'Good'; icon = '✓'; head = 'Handles the load well'; }
+    else if (A.status === 'warn') {
+      label = 'Watch'; icon = '!';
+      head = A.hot >= 1 || A.warm >= 3 ? 'Keeps up, but close to its limit' : A.scaling ? 'Keeps up, but lines cost more as load rises' : 'Keeps up, but stops often';
+    } else { label = 'Overloaded'; icon = '×'; head = 'Runs out of time at peak'; }
+  }
+  const li = [];
+  if (A.hot) li.push([B(`${plural(A.hot, 'interval')} at 90% busy or more`), ': lines were waiting, and some may have been lost.']);
+  else if (A.warm) li.push([B(`${plural(A.warm, 'interval')} above 70% busy.`)]);
+  if (A.pauses) {
+    const all = A.freezes.concat(A.hiccups), m = all.reduce((x, y) => y.r.stallMs > x.r.stallMs ? y : x), by = {};
+    for (const f of all) by[f.cause] = (by[f.cause] || 0) + 1;
+    const why = Object.entries(by).sort((x, y) => y[1] - x[1]).map(([c, n]) => `${n} ${SHORT[c]}`).join(', ');
+    li.push([B(plural(A.pauses, 'pause') + ' of 250 ms or more'), (A.freezes.length ? ` (${A.freezes.length} over 1 s)` : '') + `, the longest ${ms(m.r.stallMs)} at ${when(m.r)}: ${why}.`]);
+  }
+  for (const s of A.slowStm.slice(0, 2)) li.push([B('Slow query '), el('code', null, s.k), `: ${plural(s.n, 'call')}, about ${f0(s.ms / s.n)} ms each.`]);
+  if (A.starvedShare >= 0.2) li.push([B('Short of processor time'), `: about ${f0(A.starvedShare * 100)}% of its own code's time went to waiting for the processor. Another program, a thin VPS, or swapping.`]);
+  if (A.tot.occ > 0 && A.tot.out / A.tot.occ >= 0.05) li.push([B('Its own output is expensive'), `: ${f0(A.tot.out / A.tot.occ * 100)}% of the busy time` +
+    (A.info && A.info.debug != null ? ` (DebugLevel ${A.info.debug})` : '') + '. Set DebugLevel to 0 in hlstats.conf.']);
+  if (A.tot.occ > 0 && A.tot.lookup / A.tot.occ >= 0.05) li.push([B('Lookups are expensive'), `: ${f0(A.tot.lookup / A.tot.occ * 100)}% of the busy time (GeoIP, DNS, server queries).`]);
+  if (A.starts.length) li.push([B(`Started ${A.starts.length === 1 ? 'once' : f0(A.starts.length) + ' times'}`), ' in this period' +
+    (A.killed ? `, ${A.killed === A.starts.length ? (A.killed === 1 ? '' : 'each time ') + 'after a run' : f0(A.killed) + ' of them after a run'} that did not stop normally (ended by force, or crashed).` : '.')]);
+  box.className = 'panel verdict s-' + A.status;
+  box.replaceChildren(el('span', { class: 'status' }, el('i', { 'aria-hidden': 'true' }, icon), label),
+                      el('div', null, el('h2', null, head), p, li.length ? el('ul', null, li.map(x => el('li', null, x))) : null));
+}
+
+// A tile value with its unit: [number, small unit]
+const val = (v, unit) => [v, el('small', null, unit)];
+const valMs = v => v >= 1000 ? val(f1(v / 1000), ' s') : val(v < 10 ? f1(v) : f0(v), ' ms');
+
+function renderKpis(A, rows) {
+  const pk = A.peak, ok = A.status !== 'none', c = capacity(A);
+  const all = A.freezes.concat(A.hiccups), longest = all.length ? all.reduce((x, y) => y.r.stallMs > x.r.stallMs ? y : x).r : null;
+  const top = A.stmts[0];
+  let rc = null; for (const r of rows) if (r.rcon > 0 && (!rc || r.rcon > rc.rcon)) rc = r;
+  const k = [
+    ['Peak load', pk ? val(small(pk.rate), ' lines/s') : '–', pk ? 'at ' + when(pk) : ''],
+    ['Busy at peak', pk ? val(pct(pk.pct), '%') : '–', '100% means it cannot keep up'],
+    ['Time per line under load', ok ? val(f2(A.costHeavy), ' ms') : '–',
+      ok ? (A.rough ? 'little load: everything counted' : A.perLine ? `incl. ≈${f2(A.perLine)} ms to receive it` : 'the timed work') : ''],
+    ['Ceiling on this machine', ok ? val((A.rough ? '>' : '≈') + f0(round100(A.capacity)), ' lines/s') : '–',
+      ok ? (A.rough ? 'a low estimate: too little load' : A.capacity / pk.rate >= 1.15 ? 'estimate: ' + times(A.capacity / pk.rate) + '× the peak seen' : 'estimate: about the peak seen') : ''],
+    ['Handles with ease', c ? val((A.rough ? '>' : '≈') + f0(c.easy), c.easy === 1 ? ' server' : ' servers') : '–',
+      c ? (c.full ? 'full servers' : `at ${small(c.per)} lines/s each`) + (A.rough ? '' : ` · limit ${f0(c.limit)}`) : ''],
+    ['Pauses of 250 ms or more', f0(A.pauses), longest ? `${A.freezes.length} over 1 s · longest ${ms(longest.stallMs)}` : 'none: no server waited'],
+    ['Heaviest statement', top ? valMs(top.ms / top.n) : '–',
+      top ? shortName(top.k) + (top.cadence ? ` · every ${top.cadence.regular ? '' : '~'}${every(top.cadence.every)}` : '') : 'no statement in this period', top ? top.k : null],
+    ['Longest RCON wait', rc ? valMs(rc.rcon) : '–', rc ? `at ${when(rc)} · ${plural(A.calls.rcon, 'command')} waited` : 'no command waited for an answer'],
+  ];
+  $('#kpis').replaceChildren(...k.map(x => el('div', { class: 'kpi' }, el('div', { class: 'l' }, x[0]), el('div', { class: 'v' }, x[1]),
+    el('div', x[3] ? { class: 's', title: x[3] } : { class: 's' }, x[2]))));
+}
+
+// How many game servers: the ceiling shared between servers that each send "per" lines a second
+function capacity(A) {
+  if (A.status === 'none') return null;
+  const tidy = n => n >= 100 ? Math.floor(n / 10) * 10 : Math.floor(n);
+  const count = per => ({ per, easy: tidy(0.7 * A.capacity / per), limit: tidy(A.capacity / per) });
+  const seen = A.srv && A.srv.busy > 0 ? A.srv.busy : 0, full = A.srv && A.srv.full >= seen ? A.srv.full : 0, up = v => v < 10 ? Math.ceil(v * 10) / 10 : Math.ceil(v);
+  const c = count(ASSUME || (full ? up(full) : Math.max(20, Math.ceil(seen))));
+  c.fullPer = full ? up(full) : 0;                                                  // what a full server would send, when the log tells
+  c.full = c.fullPer > 0 && c.per === c.fullPer;                                    // and the figure is that
+  c.seen = seen && Math.abs(seen - c.per) > 0.15 * c.per ? count(seen) : null;      // the servers of this log, when they are not the figure
+  return c;
+}
+function renderCapacity(A) {
+  const c = capacity(A), sv = A.srv, sub = $('#capsub'), input = $('#per');
+  if (sv) sub.replaceChildren(`Up to ${plural(sv.max, 'game server')} sent lines at once` + (sv.players ? `, with ${plural(sv.players, 'player')}` : '') +
+    (sv.full ? (sv.fill >= 0.95 ? ', full at times' : `, never more than ${f0(Math.max(1, sv.fill * 100))}% full`) : '') + '. A busy server sent ', B(small(sv.busy) + ' lines/s'),
+    ', the busiest ', B(small(sv.top)), '.',
+    ...(c && c.fullPer ? [` A full one (${plural(Math.round(sv.size), 'player')}) would send about `, B(small(c.fullPer)), ': the figure starts there.']
+                       : [' The figure starts at 20 lines/s, a heavy server, or at yours if they send more.']));
+  else sub.textContent = 'This log does not count the game servers (an older profiler wrote it). The figure starts at 20 lines/s, a heavy server.';
+  if (document.activeElement !== input) input.value = c ? c.per : (ASSUME || 20);
+  const out = $('#capout');
+  if (!c) out.replaceChildren(el('p', { class: 'empty' }, 'There is no load in this period to work it out from.'));
+  else {
+    const pre = A.rough ? '>' : '≈', n = v => el('td', { class: 'n' }, B(pre + f0(v)));
+    const row = (what, detail, x) => el('tr', null, el('td', null, what, detail ? el('small', null, detail) : null), n(x.easy), n(x.limit));
+    out.replaceChildren(el('table', null,
+      el('thead', null, el('tr', null, el('th', null, 'Game servers it can handle'), el('th', { class: 'n' }, 'With ease', el('small', null, '70% busy')), el('th', { class: 'n' }, 'Limit', el('small', null, '100% busy')))),
+      el('tbody', null, c.full ? row('Full servers', ` (${small(c.per)} lines/s each)`, c) : row(`Servers sending ${small(c.per)} lines/s`, '', c),
+        c.seen ? row('Servers like the ones in this log', ` (${small(c.seen.per)} lines/s when busy)`, c.seen) : null)));
+  }
+  $('#capnote').textContent = !c ? '' : (c.full ? 'As if every server were full and busy at the same moment, which never happens: more fit in practice. '
+      : 'As if every server sent that much at the same moment, which never happens: more fit in practice. ') +
+    (A.rough ? 'Too little load in this log to measure the ceiling well: these are low estimates.' : `From the ceiling of ${f0(round100(A.capacity))} lines/s on this machine; rougher the further from the load seen here.`) +
+    (c.fullPer && sv.fill < 0.3 ? ' The servers were far from full here, so what a full one would send is a rough guess.' : '') +
+    (sv && sv.perPlayer > 5 ? ` This looks like a test replay (${f0(sv.perPlayer)} lines/s for each player): with real players a line costs more, so count on fewer servers.` : '');
+}
+$('#per').addEventListener('input', e => {
+  const v = parseFloat(e.target.value);
+  ASSUME = v > 0 ? v : null;
+  if (LAST) { renderCapacity(LAST); renderKpis(LAST, ALL.slice(R0, R1 + 1)); }
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The period: a strip of the whole log, the window shown, and its handles
+// ---------------------------------------------------------------------------------------------------------------------
+function renderNav() {
+  const host = $('#nav'), W = Math.max(300, host.clientWidth), L = 50, Rm = 12, pw = W - L - Rm, T = 3, ph = 30, y0 = T + ph, H = y0 + 15;
+  const N = ALL.length, k = Math.max(1, Math.ceil(N / Math.max(1, Math.floor(pw / 2)))), m = Math.ceil(N / k);
+  const vals = [], evs = [], starts = []; let vmax = 0;
+  for (let j = 0; j < m; j++) {
+    let v = 0, st = 0;
+    for (let q = j * k; q < Math.min(N, (j + 1) * k); q++) { const r = ALL[q]; if (r.rate > v) v = r.rate; if (r.stallMs > st) st = r.stallMs; if (r.start && q > 0) starts.push(q); }
+    vals.push(v); if (st >= HICCUP_MS) evs.push([j, st]); if (v > vmax) vmax = v;
+  }
+  const bw = pw / m, x = j => L + (j + 0.5) * bw, y = v => y0 - (ph - 5) * v / (vmax || 1), X = i => L + pw * i / N;
+  let g = `<rect class="nav-bg" x="${L}" y="${T}" width="${pw}" height="${ph}" rx="3"/>`;
+  g += `<path class="nav-area" d="${vals.map((v, j) => (j ? 'L' : 'M') + x(j).toFixed(1) + ' ' + y(v).toFixed(1)).join('')}L${x(m - 1).toFixed(1)} ${y0}L${x(0).toFixed(1)} ${y0}Z"/>`;
+  for (const q of starts) g += `<line class="nav-start" x1="${X(q).toFixed(1)}" x2="${X(q).toFixed(1)}" y1="${T}" y2="${y0}"/>`;
+  for (const [j, st] of evs) g += `<line class="nav-ev ${st >= FREEZE_MS ? 'c' : 'w'}" x1="${x(j).toFixed(1)}" x2="${x(j).toFixed(1)}" y1="${T + 1}" y2="${T + 8}"/>`;
+  const nl = Math.max(1, Math.min(8, Math.floor(pw / 110), N - 1));
+  for (let t = 0, last = -1; t <= nl; t++) {
+    const i = Math.round(t / nl * (N - 1));
+    if (i === last) continue; last = i;
+    g += `<text class="ax" x="${(t === 0 ? L : t === nl ? L + pw : X(i + 0.5)).toFixed(1)}" y="${H - 2}" text-anchor="${t === 0 ? 'start' : t === nl ? 'end' : 'middle'}">${esc(when(ALL[i]))}</text>`;
+  }
+  const handle = (id, name) => `<g class="nav-h" id="${id}" data-h="${id === 'nh0' ? 0 : 1}" tabindex="0" role="slider" aria-label="${name}">` +
+    `<rect x="-4.5" y="${T + 3}" width="9" height="${ph - 6}" rx="3"/><line x1="-1.5" x2="-1.5" y1="${T + 11}" y2="${T + ph - 11}"/><line x1="1.5" x2="1.5" y1="${T + 11}" y2="${T + ph - 11}"/></g>`;
+  g += `<rect class="nav-dim" id="nd0" y="${T}" height="${ph}"/><rect class="nav-dim" id="nd1" y="${T}" height="${ph}"/>` +
+       `<rect class="nav-win" id="nwin" data-h="win" y="${T + 0.75}" height="${ph - 1.5}" rx="3" tabindex="0" role="slider" aria-label="Period shown: move it"/>` +
+       handle('nh0', 'Start of the period') + handle('nh1', 'End of the period');
+  host.innerHTML = `<svg id="navsvg" width="${W}" height="${H}">${g}</svg>`;
+  NAVG = { L, pw, N, T, ph };
+  updateNav();
+}
+function updateNav() {
+  if (!NAVG || !$('#navsvg')) return;
+  const { L, pw, N } = NAVG, X = i => L + pw * i / N, x0 = X(R0), x1 = X(R1 + 1), set = (id, a) => { const e = $('#' + id); for (const k in a) e.setAttribute(k, a[k]); };
+  set('nd0', { x: L, width: Math.max(0, x0 - L).toFixed(1) });
+  set('nd1', { x: x1.toFixed(1), width: Math.max(0, L + pw - x1).toFixed(1) });
+  set('nwin', { x: x0.toFixed(1), width: Math.max(1, x1 - x0).toFixed(1), 'aria-valuemin': 0, 'aria-valuemax': N - 1, 'aria-valuenow': R0,
+                'aria-valuetext': `${when(ALL[R0])} to ${when(ALL[R1])}` });
+  set('nh0', { transform: `translate(${x0.toFixed(1)},0)`, 'aria-valuemin': 0, 'aria-valuemax': N - 1, 'aria-valuenow': R0, 'aria-valuetext': when(ALL[R0]) });
+  set('nh1', { transform: `translate(${x1.toFixed(1)},0)`, 'aria-valuemin': 0, 'aria-valuemax': N - 1, 'aria-valuenow': R1, 'aria-valuetext': when(ALL[R1]) });
+}
+function navIdx(e) {
+  const r = $('#navsvg').getBoundingClientRect();
+  return Math.max(0, Math.min(NAVG.N - 1, Math.floor((e.clientX - r.left - NAVG.L) / NAVG.pw * NAVG.N)));
+}
+const NAV = $('#nav');
+NAV.addEventListener('pointerdown', e => {
+  if (!NAVG || e.button > 0) return;
+  const svg = e.target.closest('svg'); if (!svg) return;
+  const h = e.target.closest('[data-h]'), i = navIdx(e);
+  navMode = { m: h ? h.dataset.h : 'new', a: i, r0: R0, r1: R1, moved: false };
+  svg.setPointerCapture(e.pointerId);
+  if (h) h.focus({ preventScroll: true });
+  e.preventDefault();
+});
+NAV.addEventListener('pointermove', e => {
+  if (!navMode) return;
+  const i = navIdx(e), m = navMode, N = ALL.length, min = minRows();
+  if (i !== m.a) m.moved = true;
+  if (m.m === '0') R0 = Math.max(0, Math.min(i, R1 - min + 1));
+  else if (m.m === '1') R1 = Math.min(N - 1, Math.max(i, R0 + min - 1));
+  else if (m.m === 'win') { const len = m.r1 - m.r0; R0 = Math.max(0, Math.min(N - 1 - len, m.r0 + i - m.a)); R1 = R0 + len; }
+  else if (m.moved) { const a = Math.min(m.a, i), b = Math.max(m.a, i); if (b - a + 1 >= min) { R0 = a; R1 = b; } }
+  updateNav(); scheduleRender();
+});
+function navEnd() {
+  if (!navMode) return;
+  const m = navMode; navMode = null;
+  if (m.m === 'new' && !m.moved) {          // a click beside the window: the window moves there
+    const len = R1 - R0, N = ALL.length;
+    R0 = Math.max(0, Math.min(N - 1 - len, m.a - (len >> 1))); R1 = R0 + len;
+    updateNav();
+  }
+  scheduleRender();
+}
+NAV.addEventListener('pointerup', navEnd);
+NAV.addEventListener('pointercancel', navEnd);
+NAV.addEventListener('dblclick', () => { R0 = 0; R1 = ALL.length - 1; render(); });
+NAV.addEventListener('keydown', e => {
+  const h = e.target.closest && e.target.closest('[data-h]'); if (!h || !ALL.length) return;
+  const N = ALL.length, min = minRows(), step = Math.max(1, Math.round(N / 100)) * (e.shiftKey ? 10 : 1);
+  let d;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') d = -step; else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') d = step;
+  else if (e.key === 'Home') d = -N; else if (e.key === 'End') d = N; else return;
+  e.preventDefault();
+  const m = h.dataset.h;
+  if (m === '0') R0 = Math.max(0, Math.min(R1 - min + 1, R0 + d));
+  else if (m === '1') R1 = Math.min(N - 1, Math.max(R0 + min - 1, R1 + d));
+  else { const len = R1 - R0; R0 = Math.max(0, Math.min(N - 1 - len, R0 + d)); R1 = R0 + len; }
+  updateNav(); scheduleRender();
+});
+$('#bAll').onclick = () => { R0 = 0; R1 = ALL.length - 1; render(); };
+// The hour with the most lines
+$('#bPeak').onclick = () => {
+  let s = 0, l = 0, j = 0, best = -1, a = 0, b = ALL.length - 1;
+  for (let i = 0; i < ALL.length; i++) {
+    s += ALL[i].dt; l += ALL[i].lines;
+    while (j < i && s - ALL[j].dt >= 3600) { s -= ALL[j].dt; l -= ALL[j].lines; j++; }
+    if (s >= 3600 * 0.98 && l > best) { best = l; a = j; b = i; }
+  }
+  R0 = a; R1 = b; render();
+};
+$('#bLast').onclick = () => {
+  let s = 0, i = ALL.length - 1;
+  while (i > 0 && s + ALL[i].dt <= 3600) s += ALL[i--].dt;
+  R0 = i; R1 = ALL.length - 1; render();
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The charts over time. A step of a chart covers one interval or more: it shows the heaviest of them for what the
+// chart is about (the most lines, the most database time, the longest pause...), so a short spike is never averaged away.
+// ---------------------------------------------------------------------------------------------------------------------
+function bucketize(rows, nb) {
+  const n = rows.length, k = Math.max(1, Math.ceil(n / nb)), out = [];
+  for (let i0 = 0; i0 < n; i0 += k) {
+    const i1 = Math.min(n, i0 + k) - 1, b = { i0, i1, k: i1 - i0 + 1, a: rows[i0], z: rows[i1], lines: 0, dt: 0, cpu: 0, cpuDt: 0, start: false,
+                                              load: null, pl: null, busy: null, db: null, sel: null, selMs: 0, rc: null, pause: null };
+    for (let i = i0; i <= i1; i++) {
+      const r = rows[i];
+      b.lines += r.lines; b.dt += r.dt;
+      if (r.cpu != null) { b.cpu += r.cpu; b.cpuDt += r.dt; }
+      if (r.start && i > 0) b.start = true;
+      if (!b.load || r.rate > b.load.rate) b.load = r;
+      if (r.pl != null && (!b.pl || r.pl > b.pl.pl)) b.pl = r;
+      if (!b.busy || r.occ > b.busy.occ) b.busy = r;
+      if (!b.db || r.db > b.db.db) b.db = r;
+      if (SEL) { const s = selMs(r); if (s > b.selMs || (s > 0 && !b.sel)) { b.sel = r; b.selMs = s; } }
+      if (!b.rc || r.rcon + r.sent > b.rc.rcon + b.rc.sent) b.rc = r;
+      if (!b.pause || r.stallMs > b.pause.stallMs) b.pause = r;
+    }
+    b.rate = b.dt ? b.lines / b.dt : 0;
+    out.push(b);
+  }
+  return { BK: out, k };
+}
+
+function buildChartList() {
+  $('#chartlist').replaceChildren(...CHARTS.map(c => el('div', { class: 'chart', id: 'ch-' + c.id },
+    el('div', { class: 'chead' }, el('h3', null, c.title), el('span', { class: 'unit', id: 'u-' + c.id }, c.unit), el('div', { class: 'legend', id: 'lg-' + c.id })),
+    el('div', { class: 'host', id: 'h-' + c.id }))));
+}
+buildChartList();
+
+// The legend of a chart: [kind, color, label, title]. kind: sq (a fill), ln (a line), wash (an area), dash (a reference line)
+function legend(id, items, ...extra) {
+  $('#lg-' + id).replaceChildren(...items.map(([kind, color, label, title]) => el('span', title ? { title } : null,
+    el('i', { class: kind === 'ln' ? 'ln' : kind === 'dash' ? 'dash' : '', style: kind === 'dash' ? '' : `background:${color}` + (kind === 'wash' ? ';opacity:.3' : '') }), label)),
+    ...extra.filter(Boolean));
+}
+const plot = ph => ({ T: 8, ph, y0: 8 + ph });
+const linTicks = (ax, P, fmt) => { const t = []; for (let k = 0; k <= ax.n; k++) t.push([P.y0 - P.ph * k / ax.n, (fmt || tick)(ax.step * k, ax.step), k === 0]); return t; };
+function frame(G, P, ticks, body, top, label) {
+  const H = P.y0 + 20;
+  let g = '';
+  for (const [y, t, base] of ticks) g += `<line class="${base ? 'base' : 'grid'}" x1="${G.L}" x2="${G.W - G.Rm}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/><text class="ax" x="${G.L - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end">${esc(t)}</text>`;
+  for (const [X, t] of G.xl) g += `<text class="ax" x="${X.toFixed(1)}" y="${H - 5}" text-anchor="middle">${esc(t)}</text>`;
+  for (const X of G.starts) g += `<line class="startmark" x1="${X.toFixed(1)}" x2="${X.toFixed(1)}" y1="${P.T}" y2="${P.y0}"/>`;
+  return `<svg class="tchart" width="${G.W}" height="${H}" role="img" aria-label="${esc(label)}">${g}${body}${top || ''}` +
+         `<rect class="sel" y="${P.T}" height="${P.ph}" width="0"/><line class="cur" y1="${P.T}" y2="${P.y0}" style="display:none"/></svg>`;
+}
+const noteIn = (G, P, text) => `<text class="note-in" x="${(G.L + G.pw / 2).toFixed(1)}" y="${(P.T + P.ph / 2 + 4).toFixed(1)}" text-anchor="middle">${esc(text)}</text>`;
+// A column of stacked parts [[class, px], ...] from the baseline: a gap of the surface between parts, the top rounded
+function column(X, w, y0, segs, gap) {
+  segs = segs.filter(p => p[1] >= 0.3);
+  let s = '', y = y0;
+  segs.forEach(([cls, h], j) => {
+    y -= h;
+    const last = j === segs.length - 1, hh = gap && !last && h > 3 ? h - gap : h, yy = y + (h - hh);
+    if (last && w >= 8 && hh >= 2) {
+      const r = Math.min(4, w / 2, hh);
+      s += `<path class="${cls}" d="M${X.toFixed(1)} ${(yy + hh).toFixed(1)}v${(r - hh).toFixed(1)}q0 ${-r} ${r} ${-r}h${(w - 2 * r).toFixed(1)}q${r} 0 ${r} ${r}v${(hh - r).toFixed(1)}z"/>`;
+    } else s += `<rect class="${cls}" x="${X.toFixed(1)}" y="${yy.toFixed(1)}" width="${w.toFixed(1)}" height="${hh.toFixed(1)}"/>`;
+  });
+  return s;
+}
+// Parts in ms to px, cut where they leave the plot
+function stack(parts, sc, room) {
+  const out = [];
+  for (const [cls, v] of parts) { let h = v * sc; if (!(h > 0)) continue; if (h > room) h = room; room -= h; out.push([cls, h]); if (room <= 0) break; }
+  return out;
+}
+// The top of a value axis that a few far bigger values do not flatten: they go off the scale, marked
+function robustMax(vals) {
+  const v = vals.filter(x => x > 0).sort((a, b) => a - b);
+  if (!v.length) return 0;
+  const top = v[v.length - 1], q = p => v[Math.min(v.length - 1, Math.floor(p * v.length))];
+  return v.length >= 10 && top > 5 * q(0.9) ? Math.max(2 * q(0.9), q(0.97)) : top;
+}
+// Runs of points, broken where a value is missing
+function runs(pts) { const out = []; let cur = null; for (const p of pts) { if (!p) { cur = null; continue; } if (!cur) out.push(cur = []); cur.push(p); } return out; }
+const pathOf = pts => runs(pts).map(r => r.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('')).join('');
+const areaOf = (pts, y0) => runs(pts).map(r => r.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('') +
+  `L${r[r.length - 1][0].toFixed(1)} ${y0}L${r[0][0].toFixed(1)} ${y0}Z`).join('');
+
+function renderCharts(rows, A) {
+  const W = Math.max(300, $('#h-load').clientWidth), L = 50, Rm = 12, pw = W - L - Rm;
+  const { BK, k } = bucketize(rows, Math.max(1, Math.min(rows.length, Math.floor(pw / 3))));
+  const n = BK.length, bw = pw / n, x = i => L + (i + 0.5) * bw, INT = intervalOf(A);
+  const step = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(pw / (manyDays ? 120 : 92))))), xl = [];
+  for (let i = 0; i < n; i += step) if (x(i) < W - Rm - 28) xl.push([Math.max(x(i), L + 26), when(BK[i].a)]);
+  const G = { W, L, Rm, pw, n, bw, x, xl, starts: BK.map((b, i) => b.start ? L + i * bw : null).filter(v => v != null),
+              gap: bw >= 6 ? 2 : 0 };
+  G.w = Math.min(24, Math.max(1, bw - G.gap)); G.off = (bw - G.w) / 2;
+  VIEW = { L, pw, n, BK, k, INT };
+  for (const c of CHARTS) $('#u-' + c.id).textContent = c.unit.replace('@', INT + ' s');
+  $('#chsub').textContent = (k > 1 ? `Each step covers ${dur(k * INT)} and shows its heaviest ${INT}-s interval. ` : '') + 'Hover for details, drag across a chart to zoom.';
+  $('#h-load').innerHTML  = chartLoad(G, BK, k);
+  $('#h-pl').innerHTML    = chartPlayers(G, BK);
+  $('#h-busy').innerHTML  = chartBusy(G, BK);
+  $('#h-db').innerHTML    = chartDb(G, BK);
+  $('#h-rcon').innerHTML  = chartRcon(G, BK);
+  $('#h-pause').innerHTML = chartPause(G, BK, rows);
+  paintCursor();
+  if ($('#tv').open) renderTable();
+}
+
+function chartLoad(G, BK, k) {
+  const P = plot(110), many = k > 1;
+  const ax = axis(Math.max(1, ...BK.map(b => b.load.rate)) * 1.04), y = v => P.y0 - P.ph * v / ax.max;
+  const line = pathOf(BK.map((b, i) => [G.x(i), y(b.load.rate)]));
+  const area = areaOf(BK.map((b, i) => [G.x(i), y(many ? b.rate : b.load.rate)]), P.y0);
+  let pi = 0; BK.forEach((b, i) => { if (b.load.rate > BK[pi].load.rate) pi = i; });
+  const pv = BK[pi].load.rate, px = G.x(pi), py = y(pv), right = px > G.W - G.Rm - 90;
+  const peak = pv > 0 ? `<circle class="dot" cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4"/><text class="lbl" x="${(right ? px - 8 : px + 8).toFixed(1)}" y="${Math.max(py + 4, P.T + 9).toFixed(1)}" text-anchor="${right ? 'end' : 'start'}">${small(pv)}/s</text>` : '';
+  legend('load', many ? [['ln', 'var(--s1)', 'Busiest interval of each step'], ['wash', 'var(--s1)', 'Average of the step']] : []);
+  return frame(G, P, linTicks(ax, P), `<path class="area" d="${area}"/><path class="line" d="${line}"/>`, peak, 'Load: log lines a second');
+}
+
+function chartPlayers(G, BK) {
+  const P = plot(80);
+  if (!BK.some(b => b.pl)) { legend('pl', []); return frame(G, P, [[P.y0, '0', true]], noteIn(G, P, 'No players counted in this period (or an older profiler wrote the log)'), '', 'Players'); }
+  const ax = axis(Math.max(1, ...BK.map(b => b.pl ? Math.max(b.pl.pl, b.pl.sl || 0) : 0)) * 1.04), y = v => P.y0 - P.ph * v / ax.max;
+  const pts = BK.map((b, i) => b.pl ? [G.x(i), y(b.pl.pl)] : null), room = BK.map((b, i) => b.pl && b.pl.sl ? [G.x(i), y(b.pl.sl)] : null);
+  const hasRoom = room.some(Boolean);
+  legend('pl', [['ln', 'var(--s1)', 'Players', 'The players on the game servers that sent lines, the highest over 30 s'],
+                ...(hasRoom ? [['ln', 'var(--de)', 'Max Slots', 'The players those servers have room for (their slots)']] : [])]);
+  return frame(G, P, linTicks(ax, P), (hasRoom ? `<path class="room" d="${pathOf(room)}"/>` : '') + `<path class="area" d="${areaOf(pts, P.y0)}"/><path class="line" d="${pathOf(pts)}"/>`, '', 'Players');
+}
+
+function chartBusy(G, BK) {
+  const P = plot(130), ax = axis(Math.max(1, robustMax(BK.map(b => b.busy.occ))) * 1.05), sc = P.ph / ax.max;
+  let body = '', over = '';
+  const off = [];
+  BK.forEach((b, i) => {
+    const r = b.busy; if (!(r.occ > 0)) return;
+    body += column(G.L + i * G.bw + G.off, G.w, P.y0, stack(PARTS.map(([key, cls]) => [cls, partVal(r, key)]), sc, P.ph), G.gap);
+    if (r.occ > ax.max * 1.001) off.push([i, r.occ]);
+  });
+  over = offScale(G, P, off);
+  const used = new Set(PARTS.filter(([key]) => BK.some(b => partVal(b.busy, key) > 0)).map(p => p[0]));
+  legend('busy', LEGEND_ORDER.filter(k => used.has(k)).map(k => { const p = PARTS.find(x => x[0] === k); return ['sq', PCOLOR[p[1]], p[2], p[3]]; }),
+         off.length ? el('span', { title: 'Taller than the scale: the value is in the tooltip, and on the RCON and Pauses charts' }, '▲ off the scale') : null);
+  return frame(G, P, linTicks(ax, P), body, over, 'Busy time, by part');
+}
+// Columns taller than the scale: a mark at the top, the value written by the biggest few
+function offScale(G, P, off) {
+  let s = '', put = [];
+  off.sort((a, b) => b[1] - a[1]);
+  const xs = off.map(([i]) => G.x(i));
+  for (const [i, v] of off) {
+    const X = G.x(i);
+    s += `<path class="clip" d="M${(X - 4).toFixed(1)} ${P.T + 6}L${(X + 4).toFixed(1)} ${P.T + 6}L${X.toFixed(1)} ${P.T - 1}Z"/>`;
+    // A label beside its mark, where it covers no other mark nor label
+    const text = ms(v), wide = 7 + text.length * 6.6, right = X + wide > G.W - G.Rm, a = right ? X - wide : X, b = right ? X : X + wide;
+    if (put.length < 5 && put.every(([p, q]) => b < p - 4 || a > q + 4) && xs.every(q => q === X || q < a - 5 || q > b + 5)) {
+      s += `<text class="lbl" x="${(right ? X - 7 : X + 7).toFixed(1)}" y="${P.T + 7}" text-anchor="${right ? 'end' : 'start'}">${esc(text)}</text>`;
+      put.push([a, b]);
+    }
+  }
+  return s;
+}
+
+function chartDb(G, BK) {
+  const P = plot(110), rep = b => SEL && b.sel ? b.sel : b.db;
+  const top = Math.max(0, ...BK.map(b => rep(b).db));
+  const follow = SEL ? [el('span', { class: 'hint' }, ' '), el('button', { type: 'button', id: 'unfollow', style: 'font-size:11.5px;padding:1px 8px' }, 'Stop following')]
+                     : [el('span', { class: 'hint' }, 'Click a statement in the table below to follow it here')];
+  legend('db', SEL ? [['sq', 'var(--s2)', shortName(SEL), SEL], ['sq', 'var(--de)', 'Other statements']] : [], ...follow);
+  if ($('#unfollow')) $('#unfollow').onclick = () => { SEL = null; render(); };
+  if (!(top > 0)) return frame(G, P, [[P.y0, '0', true]], noteIn(G, P, 'No database time in this period'), '', 'Database');
+  const ax = axis(top * 1.05), sc = P.ph / ax.max;
+  let body = '';
+  BK.forEach((b, i) => {
+    const r = rep(b); if (!(r.db > 0)) return;
+    const s = SEL ? Math.min(r.db, selMs(r)) : r.db;
+    body += column(G.L + i * G.bw + G.off, G.w, P.y0, stack(SEL ? [['p-db', s], ['p-rest', r.db - s]] : [['p-db', s]], sc, P.ph), G.gap);
+  });
+  return frame(G, P, linTicks(ax, P), body, '', 'Database time');
+}
+
+function chartRcon(G, BK) {
+  const P = plot(90), top = Math.max(0, ...BK.map(b => b.rc.rcon + b.rc.sent));
+  legend('rcon', [['sq', 'var(--s3)', 'Waiting for answers', PARTS[3][3]], ['sq', 'var(--s4)', 'Sending, connecting', PARTS[4][3]]]);
+  if (!(top > 0)) return frame(G, P, [[P.y0, '0', true]], noteIn(G, P, 'No RCON in this period'), '', 'RCON');
+  const ax = axis(top * 1.05), sc = P.ph / ax.max;
+  let body = '';
+  BK.forEach((b, i) => {
+    const r = b.rc; if (!(r.rcon + r.sent > 0)) return;
+    body += column(G.L + i * G.bw + G.off, G.w, P.y0, stack([['p-rcon', r.rcon], ['p-sent', r.sent]], sc, P.ph), G.gap);
+  });
+  let ref = '';
+  if (ax.max >= RCON_WAIT_MS) {
+    const y = P.y0 - P.ph * RCON_WAIT_MS / ax.max;
+    ref = `<line class="medl" x1="${G.L}" x2="${G.W - G.Rm}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/><text class="lbl" x="${G.L + 4}" y="${(y - 4).toFixed(1)}">2 s: RCON gives up</text>`;
+  }
+  return frame(G, P, linTicks(ax, P), body, ref, 'RCON time');
+}
+
+function chartPause(G, BK, rows) {
+  const P = plot(100), live = rows.filter(r => !r.idle && r.stallMs > 0).map(r => r.stallMs), med = live.length ? median(live) : 0;
+  const top = Math.max(FREEZE_MS, ...BK.map(b => b.pause.stallMs));
+  const lo = Math.pow(10, Math.floor(Math.log10(Math.max(1, med)))), hi = Math.pow(10, Math.ceil(Math.log10(top * 1.0001)));
+  const ll = Math.log10(lo), span = Math.log10(hi) - ll, y = v => P.y0 - P.ph * (Math.log10(Math.min(hi, Math.max(lo, v))) - ll) / span;
+  const ticks = []; for (let v = lo; v <= hi * 1.0001; v *= 10) ticks.push([y(v), v >= 1000 ? f0(v / 1000) + ' s' : f0(v) + ' ms', v === lo]);
+  let body = '';
+  BK.forEach((b, i) => {
+    const v = b.pause.stallMs; if (!(v > lo)) return;
+    const yy = y(v), X = G.L + i * G.bw + G.off, cls = v >= FREEZE_MS ? 'pz c' : v >= HICCUP_MS ? 'pz w' : 'pz';
+    body += column(X, G.w, P.y0, [[cls, P.y0 - yy]], 0);
+  });
+  const hl = (v, c) => { const yy = y(v).toFixed(1); return `<line class="thr ${c}" x1="${G.L}" x2="${G.W - G.Rm}" y1="${yy}" y2="${yy}"/>`; };
+  let refs = hl(HICCUP_MS, 'w') + hl(FREEZE_MS, 'c');
+  if (med > lo) refs += `<line class="medl" x1="${G.L}" x2="${G.W - G.Rm}" y1="${y(med).toFixed(1)}" y2="${y(med).toFixed(1)}"/>`;
+  legend('pause', [['sq', 'var(--de)', 'Pause', 'The longest time the daemon went without coming back to its event loop'],
+                   ['sq', 'var(--warn)', '⚠ 250 ms or more', 'A hiccup: no game server\'s lines were handled meanwhile'],
+                   ['sq', 'var(--crit)', '✕ 1 s or more', 'A freeze'],
+                   ...(med > 0 ? [['dash', '', `Usual: ${ms(med)}`, 'The median pause. The system clock moves in steps (15.6 ms on Windows), so the usual pause is about one step']] : [])]);
+  return frame(G, P, ticks, body, refs, 'Pauses of the event loop');
+}
+
+// Hover: a crosshair on every chart, and the details of the chart under the pointer. Drag: zoom.
+function tipRow(label, value, color, on) {
+  return el('div', { class: 'r' + (on ? ' on' : '') }, el('span', null, color ? el('i', { style: 'background:' + color }) : null, label), el('b', null, value));
+}
+function tipFor(id, b) {
+  const kids = [], head = r => {
+    kids.push(el('div', { class: 't' }, when(r)));
+    kids.push(el('div', { class: 't2' }, b.k > 1 ? `the heaviest of ${b.k} intervals, ${when(b.a)} – ${b.z.time}` : `${f1(r.dt)} s interval`));
+  };
+  if (id === 'load') {
+    const r = b.load; head(r);
+    kids.push(tipRow('Lines a second', small(r.rate), 'var(--s1)'));
+    if (b.k > 1) kids.push(tipRow('Average of the step', small(b.rate)));
+    kids.push(tipRow('Lines', f0(r.lines)));
+    if (r.servers != null) kids.push(tipRow('Servers sending', f0(r.servers)), tipRow('Busiest server', small(r.top / r.dt) + ' lines/s'));
+  } else if (id === 'pl') {
+    const r = b.pl || b.load; head(r);
+    if (r.pl == null) kids.push(el('div', { class: 't2' }, 'No players counted'));
+    else {
+      kids.push(tipRow('Players', f0(r.pl), 'var(--s1)'));
+      if (r.sl) kids.push(tipRow('Max Slots', f0(r.sl) + ` (${f0(r.pl / r.sl * 100)}% full)`, 'var(--de)'));
+      if (r.sv != null) kids.push(tipRow('Servers sending', f0(r.sv)));
+      if (r.players > 0 && r.lines) kids.push(tipRow('Lines a second per player', f2(r.rate / r.players)));
+    }
+  } else if (id === 'busy') {
+    const r = b.busy; head(r);
+    kids.push(tipRow('Busy', `${ms(r.occ)} · ${pct(r.pct)}%`));
+    for (const key of LEGEND_ORDER) { const p = PARTS.find(x => x[0] === key), v = partVal(r, key); if (v >= 0.5) kids.push(tipRow(p[2], ms(v), PCOLOR[p[1]])); }
+    if (r.recv >= 0.5) kids.push(tipRow('of which receiving the lines ≈', ms(r.recv)));
+    if (r.lines) kids.push(tipRow('Per line', f2(r.occ / r.lines) + ' ms'));
+    if (b.cpuDt) kids.push(tipRow('Processor, step average', pct(b.cpu / b.cpuDt / 10) + '% of a core'));
+    kids.push(tipRow('Longest pause', ms(r.stallMs)));
+  } else if (id === 'db') {
+    const r = SEL && b.sel ? b.sel : b.db; head(r);
+    kids.push(tipRow('Database', `${ms(r.db)} · ${plural(r.dbCalls, 'statement')}`, 'var(--s2)'));
+    if (r.stmts.length) {
+      kids.push(el('div', { class: 'h' }, 'Heaviest statements'));
+      for (const s of r.stmts) kids.push(el('div', { class: 'r' + (s.k === SEL ? ' on' : '') }, el('span', { class: 'k' }, s.k), el('b', null, (s.n > 1 ? `${f0(s.n)}× ` : '') + ms(s.ms))));
+    }
+  } else if (id === 'rcon') {
+    const r = b.rc; head(r);
+    kids.push(tipRow('Waiting for answers', `${ms(r.rcon)} · ${plural(r.rconCalls, 'command')}`, 'var(--s3)'));
+    if (r.rcon >= RCON_WAIT_MS * 0.95) kids.push(el('div', { class: 't2' }, 'A command got no answer: RCON gives up after 2 s.'));
+    kids.push(tipRow('Sending, connecting', `${ms(r.sent)} · ${plural(r.sentCalls, 'message')}`, 'var(--s4)'));
+    if (r.sent >= HICCUP_MS) kids.push(el('div', { class: 't2' }, 'Long: the connection was opened first (2 s at most).'));
+    kids.push(tipRow('Longest pause', ms(r.stallMs)));
+  } else if (id === 'pause') {
+    const r = b.pause; head(r);
+    kids.push(tipRow('Longest pause', ms(r.stallMs), r.frozen ? 'var(--crit)' : r.hiccup ? 'var(--warn)' : 'var(--de)'));
+    if (r.hiccup) kids.push(el('div', { class: 't2' }, 'Spent ' + CAUSE[freezeCause(r)] + '. Every server\'s lines waited.'));
+    kids.push(tipRow('Busy', ms(r.occ)));
+    if (r.rconCalls) kids.push(tipRow('RCON, waiting', `${ms(r.rcon)} · ${plural(r.rconCalls, 'command')}`, 'var(--s3)'));
+    if (r.sent >= 1) kids.push(tipRow('RCON, sending', ms(r.sent), 'var(--s4)'));
+    if (r.db >= 1) kids.push(tipRow('Database', ms(r.db), 'var(--s2)'));
+  }
+  return kids;
+}
+function idxAt(e, clamp) {
+  const svg = e.target.closest && e.target.closest('svg.tchart'); if (!svg || !VIEW) return null;
+  const r = svg.getBoundingClientRect(), X = e.clientX - r.left;
+  if (!clamp && (X < VIEW.L - 2 || X > VIEW.L + VIEW.pw + 2)) return null;
+  return Math.max(0, Math.min(VIEW.n - 1, Math.floor((X - VIEW.L) / VIEW.pw * VIEW.n)));
+}
+function paintCursor() {
+  const bw = VIEW ? VIEW.pw / VIEW.n : 0;
+  document.querySelectorAll('#chartlist svg.tchart').forEach(svg => {
+    const c = svg.querySelector('.cur'), s = svg.querySelector('.sel');
+    if (hover == null) c.style.display = 'none'; else { const X = VIEW.L + (hover + .5) * bw; c.setAttribute('x1', X); c.setAttribute('x2', X); c.style.display = ''; }
+    if (drag == null || hover == null || drag === hover) s.setAttribute('width', 0);
+    else { const a = Math.min(drag, hover), b = Math.max(drag, hover); s.setAttribute('x', VIEW.L + a * bw); s.setAttribute('width', (b - a + 1) * bw); }
+  });
+}
+function placeTip(e, kids) {
+  const tip = $('#tip'); tip.replaceChildren(...kids); tip.style.display = 'block';
+  const tw = tip.offsetWidth, th = tip.offsetHeight; let X = e.clientX + 16, Y = e.clientY + 16;
+  if (X + tw > innerWidth - 8) X = e.clientX - tw - 16; if (Y + th > innerHeight - 8) Y = e.clientY - th - 16;
+  tip.style.left = Math.max(4, X) + 'px'; tip.style.top = Math.max(4, Y) + 'px';
+}
+function hideTip() { $('#tip').style.display = 'none'; }
+const CL = $('#chartlist');
+function hoverAt(e) {
+  const i = idxAt(e, drag != null);
+  if (i == null) { if (drag == null) { hover = null; paintCursor(); hideTip(); } return; }
+  hover = i; paintCursor();
+  const ch = e.target.closest('.chart');
+  if (drag == null && ch) placeTip(e, tipFor(ch.id.slice(3), VIEW.BK[i])); else hideTip();
+}
+CL.addEventListener('pointermove', hoverAt);
+// A touch shows the details where it lands, and they stay until the next touch elsewhere
+CL.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch' && drag == null) { hover = null; paintCursor(); hideTip(); } });
+addEventListener('pointerdown', e => { if (e.pointerType === 'touch' && !CL.contains(e.target) && hover != null) { hover = null; paintCursor(); hideTip(); } });
+CL.addEventListener('pointerdown', e => {
+  const i = idxAt(e); if (i == null) return;
+  if (e.pointerType === 'mouse' && e.button === 0) { drag = i; hover = i; e.preventDefault(); hideTip(); }
+  else hoverAt(e);
+});
+addEventListener('pointermove', e => { if (drag != null && !CL.contains(e.target)) { const svg = CL.querySelector('svg.tchart'); if (svg && VIEW) { const r = svg.getBoundingClientRect(); hover = Math.max(0, Math.min(VIEW.n - 1, Math.floor((e.clientX - r.left - VIEW.L) / VIEW.pw * VIEW.n))); paintCursor(); } } });
+addEventListener('pointerup', () => {
+  if (drag == null) return;
+  const a = Math.min(drag, hover == null ? drag : hover), b = Math.max(drag, hover == null ? drag : hover); drag = null;
+  if (b > a) { const n0 = R0 + VIEW.BK[a].i0, n1 = R0 + VIEW.BK[b].i1; if (n1 - n0 + 1 >= minRows()) { R0 = n0; R1 = n1; hover = null; hideTip(); render(); return; } }
+  paintCursor();
+});
+
+function renderTable() {
+  const BK = VIEW.BK, many = VIEW.k > 1;
+  const head = ['Time', 'Lines/s', ...(many ? ['Highest lines/s'] : []), 'Players', 'Busy ms', 'Database ms', 'RCON ms', 'Longest pause ms'];
+  const n = v => el('td', { class: 'n' }, v);
+  const body = BK.map(b => el('tr', null, el('td', null, when(b.a) + (b.z !== b.a ? ' – ' + b.z.time : '')), n(small(b.rate)), many ? n(small(b.load.rate)) : null,
+    n(b.pl ? f0(b.pl.pl) : ''), n(f0(b.busy.occ)), n(f0(b.db.db)), n(f0(b.rc.rcon + b.rc.sent)), n(f0(b.pause.stallMs))));
+  $('#tvt').replaceChildren(el('table', null, el('thead', null, el('tr', null, head.map((t, i) => el('th', i ? { class: 'n' } : null, t)))), el('tbody', null, body)));
+}
+$('#tv').addEventListener('toggle', () => { if ($('#tv').open && VIEW) renderTable(); });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Time budget, scaling, statements, events
+// ---------------------------------------------------------------------------------------------------------------------
+function renderBudget(A, zoomed) {
+  const t = A.tot, busy = t.occ, wall = A.secs;
+  $('#budsub').textContent = `Added up over ${zoomed ? 'the period chosen above' : 'the whole log'}.`;
+  const parts = [
+    ['p-perl', 'Perl code', t.perl + t.recv, null, null, t.recv > 0 ? `${dur(t.perl / 1000)} timed, ≈${dur(t.recv / 1000)} receiving the lines` : 'handling the lines, timers'],
+    ['p-db', 'Database', t.db, A.calls.db, 'statement'],
+    ['p-rcon', 'RCON, waiting for answers', t.rcon, A.calls.rcon, 'command'],
+    ['p-sent', 'RCON, sending', t.sent, A.calls.sent, 'message'],
+    ['p-other', 'Lookups & output', t.lookup + t.out, A.calls.lookup + A.calls.out, 'call'],
+    ['p-held', 'Held up, not timed', t.unacc, null, null, 'pauses nothing timed explains'],
+  ].filter(p => p[2] >= 0.5);
+  if (!parts.length) { $('#bud').replaceChildren(el('p', { class: 'empty' }, 'The daemon did nothing in this period.')); return; }
+  const tv = v => v >= 10000 ? dur(v / 1000) : ms(v);
+  $('#bud').replaceChildren(
+    el('div', { class: 'bighead' }, `Busy ${dur(busy / 1000)}`, el('span', null, ` · ${pct(busy / wall / 10)}% of the ${dur(wall)}`)),
+    el('div', { class: 'seg', role: 'img', 'aria-label': 'How the busy time splits' }, parts.map(p => el('i', { style: `flex:${p[2]} 1 0;background:${PCOLOR[p[0]]}`, title: `${p[1]}: ${tv(p[2])}` }))),
+    el('table', null,
+      el('thead', null, el('tr', null, el('th', null, 'Part'), el('th', { class: 'n' }, 'Time'), el('th', { class: 'n' }, 'Share'), el('th', { class: 'n' }, 'Count'), el('th', { class: 'n' }, 'Each'))),
+      el('tbody', null,
+        parts.map(([cls, name, v, n, w, hint]) => el('tr', null,
+          el('td', null, el('i', { class: 'sw', style: `background:${PCOLOR[cls]}` }), name, hint ? el('div', { style: 'color:var(--ink2);font-size:11.5px;margin-left:17px' }, hint) : null),
+          el('td', { class: 'n' }, tv(v)), el('td', { class: 'n' }, pct(v / busy * 100) + '%'),
+          el('td', { class: 'n' }, n ? f0(n) : (cls === 'p-perl' && A.lines ? f0(A.lines) : '')),
+          el('td', { class: 'n' }, n ? ms(v / n) : (cls === 'p-perl' && A.lines ? f2(v / A.lines) + ' ms' : '')))),
+        A.hasCpu ? el('tr', { class: 'foot' }, el('td', null, 'Processor time of the whole daemon'), el('td', { class: 'n' }, tv(t.cpu)),
+                      el('td', { class: 'n', colspan: '3' }, `${pct(t.cpu / t.cpuSecs / 10)}% of one core`)) : null)));
+}
+
+let SP = [];
+function renderScatter(rows, A) {
+  const host = $('#sc'), W = Math.max(280, host.clientWidth), H = 300, L = 46, Rm = 18, T = 26, Bm = 36, pw = W - L - Rm, ph = H - T - Bm;
+  const pts = rows.filter(r => r.lines >= 10), peak = A.peak ? A.peak.rate : 0;
+  SP = [];
+  if (!pts.length || peak <= 0) { host.replaceChildren(el('p', { class: 'empty' }, 'No load in this period.')); return; }
+  const cap = A.status !== 'none' ? A.capacity : 0;
+  const xax = axis(Math.max(peak * 1.05, cap ? Math.min(cap * 1.05, peak * 4) : 0)), xmax = xax.max;
+  let ytop = 0; for (const r of pts) if (r.pct > ytop) ytop = r.pct;
+  const yax = axis(Math.max(1, Math.min(100, ytop * 1.1, cap ? Math.min(cap, xmax) / cap * 100 : 0))), ymax = yax.max;
+  const X = v => L + pw * v / xmax, Y = v => T + ph - ph * Math.min(v, ymax) / ymax;
+  let g = '';
+  for (let k = 0; k <= yax.n; k++) { const v = yax.step * k, y = Y(v); g += `<line class="${k ? 'grid' : 'base'}" x1="${L}" x2="${W - Rm}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/><text class="ax" x="${L - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end">${tick(v, yax.step)}%</text>`; }
+  for (let k = 0; k <= xax.n; k++) { const v = xax.step * k; g += `<text class="ax" x="${X(v).toFixed(1)}" y="${T + ph + 15}" text-anchor="${k === xax.n ? 'end' : 'middle'}">${tick(v, xax.step)}</text>`; }
+  g += `<text class="lbl" x="${L + pw / 2}" y="${H - 4}" text-anchor="middle">load, lines a second</text>`;
+  if (cap) {
+    const e = Math.min(cap, xmax, ymax / 100 * cap);
+    g += `<line class="fit" x1="${X(0)}" y1="${Y(0)}" x2="${X(Math.min(peak, e)).toFixed(1)}" y2="${Y(Math.min(peak, e) / cap * 100).toFixed(1)}"/>`;
+    if (e > peak) g += `<line class="fit ex" x1="${X(peak).toFixed(1)}" y1="${Y(peak / cap * 100).toFixed(1)}" x2="${X(e).toFixed(1)}" y2="${Y(e / cap * 100).toFixed(1)}"/>`;
+    if (cap <= xmax && ymax >= 100) g += `<circle cx="${X(cap).toFixed(1)}" cy="${Y(100).toFixed(1)}" r="3" style="fill:var(--ink)"/><text class="lbl" x="${Math.max(L + 62, Math.min(W - Rm - 62, X(cap))).toFixed(1)}" y="${(Y(100) - 10).toFixed(1)}" text-anchor="middle">ceiling ≈ ${f0(round100(cap))} lines/s</text>`;
+  }
+  const stride = Math.ceil(pts.length / 1500);
+  for (let i = 0; i < pts.length; i += stride) {
+    const r = pts[i], p = { r, x: X(r.rate), y: Y(r.pct) }; SP.push(p);
+    g += `<circle class="dot${r.hiccup ? ' froze' : ''}" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4"/>`;
+  }
+  host.innerHTML = `<svg id="scs" width="${W}" height="${H}" role="img" aria-label="Busy against load">${g}<circle class="dot on" id="sch" r="5" style="display:none;fill:none"/></svg>` +
+    `<div class="note">${ymax < 100 ? `The busy axis stops at ${f0(ymax)}%; the dashed part of the line is an estimate.` : 'The dashed part of the line is an estimate: it assumes a line keeps costing the same.'}` +
+    (pts.some(r => r.hiccup) ? ' Red: an interval with a pause of 250 ms or more.' : '') + '</div>';
+  const svg = $('#scs'), ring = $('#sch');
+  svg.onmousemove = e => {
+    const b = svg.getBoundingClientRect(), mx = e.clientX - b.left, my = e.clientY - b.top; let best = null, bd = 24 * 24;
+    for (const p of SP) { const d = (p.x - mx) ** 2 + (p.y - my) ** 2; if (d < bd) { bd = d; best = p; } }
+    if (!best) { ring.style.display = 'none'; return hideTip(); }
+    ring.setAttribute('cx', best.x); ring.setAttribute('cy', best.y); ring.style.display = '';
+    placeTip(e, [el('div', { class: 't' }, when(best.r)), tipRow('Load', small(best.r.rate) + ' lines/s'), tipRow('Busy', pct(best.r.pct) + '%'),
+                 tipRow('Per line', f2(best.r.occ / best.r.lines) + ' ms'), best.r.hiccup ? tipRow('Paused', ms(best.r.stallMs), 'var(--crit)') : null]);
+  };
+  svg.onmouseleave = () => { ring.style.display = 'none'; hideTip(); };
+}
+
+function renderStmts(A) {
+  const all = A.stmts, list = STM_ALL ? all : all.slice(0, 30), host = $('#stm');
+  if (!list.length) { host.replaceChildren(el('p', { class: 'empty' }, 'No statements in this period.')); return; }
+  const top = list[0].ms || 1, num = v => v < 10 ? f1(v) : f0(v);
+  const kids = [el('table', null,
+    el('thead', null, el('tr', null, el('th', null, 'Statement'), el('th', { class: 'n' }, 'Calls'), el('th', { class: 'n' }, 'Total'), el('th', { class: 'n' }, 'Average'),
+      el('th', { class: 'n' }, 'Worst'), el('th', { class: 'n', title: 'The usual time between two intervals that list it; ~ when irregular' }, 'Every'), el('th', { style: 'width:20%' }, 'Share of database time'))),
+    el('tbody', null, list.map(s => {
+      const [name, what] = splitName(s.k);
+      const tr = el('tr', { class: 'pick' + (s.k === SEL ? ' on' : ''), tabindex: '0', 'aria-pressed': s.k === SEL ? 'true' : 'false' },
+        el('td', { class: 'k' }, name, what ? el('small', null, ' [' + what + ']') : null, s.ms / s.n >= 100 ? el('span', { class: 'tag' }, 'slow') : null),
+        el('td', { class: 'n' }, f0(s.n)), el('td', { class: 'n' }, s.ms >= 10000 ? dur(s.ms / 1000) : f0(s.ms) + ' ms'), el('td', { class: 'n' }, num(s.ms / s.n) + ' ms'),
+        el('td', { class: 'n' }, num(s.worst) + ' ms'), el('td', { class: 'n' }, s.cadence ? (s.cadence.regular ? '' : '~') + every(s.cadence.every) : '–'),
+        el('td', null, el('div', { class: 'meter', style: `width:${Math.max(1, s.ms / top * 100).toFixed(1)}%` }),
+          el('span', { style: 'color:var(--ink2);font-size:11.5px' }, (A.tot.db ? f0(Math.min(100, s.ms / A.tot.db * 100)) : 0) + '%')));
+      tr.dataset.k = s.k;
+      return tr;
+    })))];
+  if (all.length > 30) kids.push(el('button', { type: 'button', class: 'more', id: 'stmmore' }, STM_ALL ? 'Show the 30 heaviest' : `Show all ${all.length}`));
+  if (SEL && !all.some(s => s.k === SEL)) kids.push(el('div', { class: 'note' }, 'The statement followed on the Database chart does not show up in this period.'));
+  host.replaceChildren(...kids);
+}
+const STM = $('#stm');
+function pickStmt(tr) { const k = tr.dataset.k; SEL = SEL === k ? null : k; render(); const again = [...STM.querySelectorAll('tr.pick')].find(x => x.dataset.k === k); if (again) again.focus({ preventScroll: true }); }
+STM.addEventListener('click', e => {
+  if (e.target.id === 'stmmore') { STM_ALL = !STM_ALL; renderStmts(LAST); return; }
+  const tr = e.target.closest('tr.pick'); if (tr) pickStmt(tr);
+});
+STM.addEventListener('keydown', e => { const tr = e.target.closest && e.target.closest('tr.pick'); if (tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); pickStmt(tr); } });
+
+const KIND = { freeze: ['c', '✕', 'Freeze'], hiccup: ['w', '!', 'Pause'], start: ['', '↻', 'Start'], slowq: ['w', '!', 'Slow query'], slowrcon: ['w', '!', 'Slow RCON'] };
+function detailOf(e) {
+  const r = e.r, out = [];
+  if (e.cause) {
+    let d = CAUSE[e.cause].replace(/^./, c => c.toUpperCase());
+    if (e.cause === 'rcon') d += `: ${ms(r.rcon)} for ${plural(r.rconCalls, 'command')}` + (r.rcon >= RCON_WAIT_MS * 0.95 ? ', and one got no answer (RCON gives up after 2 s)' : '');
+    else if (e.cause === 'connect') d += `: ${ms(r.sent)} for ${plural(r.sentCalls, 'message')}. The first message to a server waits for its connection, 2 s at most`;
+    else if (e.cause === 'db' && e.slowest) d += ': ' + e.slowest.k;
+    out.push(d + '.');
+  }
+  for (const w of e.what) if (!/^Stopped /.test(w)) out.push(w + (/\.$/.test(w) ? '' : '.'));
+  return out;
+}
+function renderEvents(A) {
+  const host = $('#ev');
+  if (!A.events.length) { host.replaceChildren(el('p', { class: 'empty' }, 'Nothing in this period: no pause of 250 ms or more, no slow query or game server, no restart.')); return; }
+  const ev = A.events.slice(0, 200);
+  const rows = ev.map(e => {
+    const r = e.r, [cls, icon, name] = KIND[e.kind] || KIND.slowq;
+    const tr = el('tr', { class: 'pick', tabindex: '0', title: 'Zoom on it' },
+      el('td', { style: 'white-space:nowrap;font-variant-numeric:tabular-nums' }, when(r)),
+      el('td', { class: 'n' }, r.hiccup ? ms(r.stallMs) : '–'),
+      el('td', null, el('span', { class: 'pill ' + cls }, el('i', { 'aria-hidden': 'true' }, icon), name)),
+      el('td', null, detailOf(e).map((t, i) => [i ? el('br') : null, t])),
+      el('td', { class: 'n' }, `${small(r.rate)} lines/s` + (r.servers != null ? ` · ${plural(r.servers, 'server')}` : '')));
+    tr.dataset.ix = r.ix;
+    return tr;
+  });
+  host.replaceChildren(el('table', null,
+    el('thead', null, el('tr', null, el('th', null, 'Time'), el('th', { class: 'n' }, 'Pause'), el('th', null, 'What'), el('th', null, 'Why'), el('th', { class: 'n' }, 'Load then'))),
+    el('tbody', null, rows)),
+    A.events.length > 200 ? el('div', { class: 'note' }, `The first 200 of ${f0(A.events.length)}. Zoom in to see the others.`) : '');
+}
+function zoomAround(ix) {
+  const half = 36; R0 = Math.max(0, ix - half); R1 = Math.min(ALL.length - 1, ix + half);
+  if (R1 - R0 + 1 < minRows()) { R0 = 0; R1 = ALL.length - 1; }
+  render();
+  $('#charts').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+const EV = $('#ev');
+EV.addEventListener('click', e => { const tr = e.target.closest('tr.pick'); if (tr) zoomAround(+tr.dataset.ix); });
+EV.addEventListener('keydown', e => { const tr = e.target.closest && e.target.closest('tr.pick'); if (tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); zoomAround(+tr.dataset.ix); } });
+
+// Opening files
+function readFiles(list) {
+  const files = [...list]; if (!files.length) return;
+  Promise.all(files.map(f => new Promise((ok, no) => { const fr = new FileReader(); fr.onload = () => ok({ name: f.name, text: String(fr.result) }); fr.onerror = () => no(fr.error); fr.readAsText(f); })))
+    .then(show, err => alert('Could not read the file: ' + err));
+}
+$('#file').onchange = e => { readFiles(e.target.files); e.target.value = ''; };
+let depth = 0;
+addEventListener('dragenter', e => { e.preventDefault(); depth++; document.body.classList.add('dragging'); });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; document.body.classList.remove('dragging'); } });
+addEventListener('drop', e => { e.preventDefault(); depth = 0; document.body.classList.remove('dragging'); readFiles(e.dataTransfer.files); });
+let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (ALL.length) { renderNav(); render(); } }, 150); });
+</script>
+</body>
+</html>

@@ -15,6 +15,7 @@ package HLstats_Player;
 #
 # Constructor
 #
+use strict;
 use Encode qw(decode is_utf8);
 
 do "$::opt_libdir/HLstats_GameConstants.plib";
@@ -705,25 +706,23 @@ sub getAddress
        ( $self->{userid} > 0 || $::g_servers{$self->{server}}->{play_game} == CS2())) {
 
         my $slot_name = $self->{userid}."/".$self->{name};
+        my $server    = $::g_servers{$self->{server}};
 
         ::printEvent("RCON", "rcon_getaddress for $slot_name",3);
-        my $result = $::g_servers{$self->{server}}->rcon_getaddress($self->{uniqueid},$slot_name);
-
-        if (defined $result->{realuserid}) {
-            $self->{realuserid} = $result->{realuserid};
-            $self->{userid} =  $result->{UserID};
-        }
-        if (defined $result->{Address} && $result->{Address} ne "") {
-            $haveAddress = 1;
-            $self->{address}  = $result->{Address};
-            $self->{cli_port} = $result->{ClientPort};
-            $self->{ping}     = $result->{Ping};
-
-            ::printEvent("RCON", "Got Address $self->{address} for $slot_name",3);
-        } else { 
-            $haveAddress = 0;
+        # The game server is asked without waiting: the address is set when its answer comes (set_rcon_address).
+        # Until then the player has his last address, as when the game server gives none.
+        Scalar::Util::weaken(my $weak = $self);
+        if ($server->rcon_getaddress_later($self->{uniqueid}, $slot_name, sub {
+                return unless $weak;
+                $weak->geoLookup() if $weak->set_rcon_address($_[0], $slot_name);
+                $weak->updateDB();
+            })) {
             $self->{address} = $self->{lastAddress} if $self->{lastAddress};
-       }
+            return 1;
+        }
+
+        # The game server cannot be asked that way: the daemon waits for the answer
+        $haveAddress = $self->set_rcon_address($server->rcon_getaddress($self->{uniqueid}, $slot_name), $slot_name, 1);
     }
 
     if ($haveAddress == 1) {
@@ -731,6 +730,31 @@ sub getAddress
     }
 
     return 1;
+}
+
+# The player in the game server's answer to "status" (undef: not in it, or no answer): his address, his port, his
+# ping, his user id. Returns 1 with an address; without one, the player keeps his last address.
+# $connect: the connect event is handled too, as the daemon always did when it waited for the answer (the player is
+# not in the server's list yet then). Not when the answer comes later: the log line of the connection did it.
+sub set_rcon_address
+{
+    my ($self, $result, $slot_name, $connect) = @_;
+    $result = {} unless ref($result) eq 'HASH';
+
+    if (defined $result->{realuserid}) {
+        $self->{realuserid} = $result->{realuserid};
+        $self->{userid} =  $result->{UserID};
+    }
+    if (defined $result->{Address} && $result->{Address} ne "") {
+        $self->{address}  = $result->{Address};
+        $self->{cli_port} = $result->{ClientPort};
+        $self->{ping}     = $result->{Ping};
+        ::doEvent_Connect($self->{userid}, $self->{uniqueid}, $self->{address}) if $connect;
+        ::printEvent("RCON", "Got Address $self->{address} for $slot_name",3);
+        return 1;
+    }
+    $self->{address} = $self->{lastAddress} if $self->{lastAddress};
+    return 0;
 }
 
 sub geoLookup {
@@ -742,60 +766,30 @@ sub geoLookup {
     if ($ip =~ /^\[(.+?)\]:(\d+)$/) { $ip = $1 }
     elsif ($ip =~ /^(.+?):(\d+)$/ && $ip !~ /:/) { $ip = $1 }
 
-    if (($::g_geoip_binary // 0) > 0) {
-        return unless defined $::g_gi;
+    # the lookups use GeoLiteCity/GeoLite2-City.mmdb
 
-        my ($city,$state,$country,$flag,$lat,$lng);
-        my $rec; eval { $rec = $::g_gi->city(ip => $ip) }; $rec = undef if $@;
+    return unless defined $::g_gi;
 
-        if ($rec) {
-            my $c  = $rec->city;
-            my $co = $rec->country;
-            my $lo = $rec->location;
-            my $ss = $rec->most_specific_subdivision;
+    my ($city,$state,$country,$flag,$lat,$lng);
+    my $rec; eval { $rec = $::g_gi->city(ip => $ip) }; $rec = undef if $@;
 
-            $city    = $c  ? $c->name      : undef;
-            $state   = $ss ? $ss->name     : undef;
-            $country = $co ? $co->name     : undef;
-            $flag    = $co ? $co->iso_code : undef;
-            $lat     = $lo ? $lo->latitude : undef;
-            $lng     = $lo ? $lo->longitude: undef;
+    if ($rec) {
+        my $c  = $rec->city;
+        my $co = $rec->country;
+        my $lo = $rec->location;
+        my $ss = $rec->most_specific_subdivision;
 
-            return geoUpdate($self, $city, $state, $country, $flag, $lat, $lng);
-        }
-        return;
+        $city    = $c  ? $c->name      : undef;
+        $state   = $ss ? $ss->name     : undef;
+        $country = $co ? $co->name     : undef;
+        $flag    = $co ? $co->iso_code : undef;
+        $lat     = $lo ? $lo->latitude : undef;
+        $lng     = $lo ? $lo->longitude: undef;
+
+        return geoUpdate($self, $city, $state, $country, $flag, $lat, $lng);
     }
-    # Legacy DB lookup path
-    my @oct = split /\./, $ip;
-    return unless @oct == 4 && !grep { $_ !~ /^\d+$/ } @oct;
 
-    my $ipnum = $oct[0]*16777216 + $oct[1]*65536 + $oct[2]*256 + $oct[3];
-
-    my $sql1 = q{
-        SELECT locId
-          FROM geoLiteCity_Blocks
-         WHERE startIpNum <= ? AND endIpNum >= ?
-         LIMIT 1
-    };
-    my $sth1 = ::exec_cache("geo_blocks_by_ip", $sql1, $ipnum, $ipnum) or return;
-    my ($locid) = $sth1->fetchrow_array or return;
-
-    my $sql2 = q{
-        SELECT a.city        AS city,
-               a.region      AS state,
-               b.name        AS country,
-               a.country     AS flag,
-               a.latitude    AS lat,
-               a.longitude   AS lng
-          FROM geoLiteCity_Location a
-          JOIN hlstats_Countries b ON a.country = b.flag
-         WHERE a.locId = ?
-         LIMIT 1
-    };
-    my $sth2 = ::exec_cache("geo_location_by_locid", $sql2, $locid) or return;
-    my ($city,$state,$country,$flag,$lat,$lng) = $sth2->fetchrow_array or return;
-
-    return geoUpdate($self, $city, $state, $country, $flag, $lat, $lng);
+    return;
 }
 
 sub geoUpdate {

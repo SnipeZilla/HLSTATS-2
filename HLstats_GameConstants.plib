@@ -1,3 +1,5 @@
+use strict;
+
 use constant {
 	UNKNOWN => 0,
 	CSS => 1,
@@ -13,7 +15,7 @@ use constant {
 	TFC => 11,
 	DOD => 12,
 	NS => 13,
-	L4D => 13,
+	L4D => 14,
 	FOF => 15,
 	GES => 16,
 	BG2 => 17,
@@ -29,7 +31,7 @@ use constant {
 	CS2 => 27,
 };
 
-%gamecode_to_game = (
+our %gamecode_to_game = (
 	'css'      => CSS(),
 	'hl2mp'    => HL2MP(),
 	'tf'       => TF(),

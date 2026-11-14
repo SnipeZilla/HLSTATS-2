@@ -11,6 +11,11 @@
 #    https://github.com/SnipeZilla
 #    https://forums.alliedmods.net/forumdisplay.php?f=156
 
+use strict;
+
+our (%g_servers, %g_games, $s_addr, $dbh, $g_mode, $g_stdin, $g_ranktype, $g_player_minkills, $g_global_chat,
+     $g_log_chat, $g_log_chat_admins, $g_rcon_record, $ev_remotetime, $ev_daemontime);
+
 sub get_fav_weapon  {
 
     my ($player)  = @_;
@@ -173,6 +178,8 @@ sub get_player_rank
 sub get_player_data
 {
     my ($player, $get_rank)  = @_;
+    my ($fav_weapon, $fav_weapon_acc, $fav_weapon_kills, $hpk, $kd, $s_fav_weapon, $s_fav_weapon_acc,
+        $s_fav_weapon_kills);
 
     my $result = query_now("
         SELECT
@@ -219,6 +226,7 @@ sub get_player_data
 sub get_menu_text
 {
     my ($player, $skill, $kills, $deaths, $kd, $suicides, $headshots, $hpk, $acc, $connection_time, $fav_weapon, $fav_weapon_kills, $fav_weapon_acc, $s_fav_weapon, $s_fav_weapon_kills, $s_fav_weapon_acc, $rank_number, $total_players) = @_;
+    my ($points, $s_acc, $s_acc_str, $s_hpk, $s_kd, $s_points, $s_weapon_str);
 
     my $p_name         = $player->{name};
     my $p_connect_time = $player->{connect_time};
@@ -369,15 +377,13 @@ sub doEvent_Connect
     my $player            = lookupPlayer($s_addr, $playerId, $playerUniqueId);
     my $playerstr         = getPlayerInfoString($player, $playerId);
     my $min_players_rank  = $g_servers{$s_addr}->{min_players_rank};
-    my $hostname=" ";
-    my $hostgroup=" ";
     
     if ($player)
     {
 
         $ipAddr = $player->{address} unless $ipAddr;
 
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if ($player->{is_bot} == 1)
         {
             $player->set("connect_time", time());
             $player->updateDB();
@@ -405,9 +411,7 @@ sub doEvent_Connect
             recordEvent(
                 "Connects", 0,
                 $player->{playerid},
-                $ipAddr,
-                $hostname,
-                $hostgroup
+                $ipAddr
             );
         }
     }
@@ -415,9 +419,7 @@ sub doEvent_Connect
     {
         $desc = "(IGNORED) NOPLAYERINFO: ";
     }
-    
-    return $desc . $playerstr . " connected, address \"$ipAddr\","
-        . " hostname \"$hostname\", hostgroup \"$hostgroup\"";
+    return $desc . $playerstr . " connected, address \"$ipAddr\"";
 }
 
 sub getColor {
@@ -434,6 +436,7 @@ sub getColor {
 sub doEvent_EnterGame
 {
     my ($playerId, $playerUniqueId) = @_;
+    my ($connect_time, $msg);
     
     my $desc="";
     my $player = lookupPlayer($s_addr, $playerId, $playerUniqueId);
@@ -486,7 +489,7 @@ sub doEvent_EnterGame
             }
         }
         
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($isbot == 1))
+        if ($isbot == 1)
         {
             $connect_time = $player->{connect_time};
             if ($connect_time == 0)
@@ -542,6 +545,7 @@ sub doEvent_EnterGame
 sub doEvent_Disconnect
 {
     my ($pUserId, $playerUniqueId, $ev_properties) = @_;
+    my ($hideranking, $lastName);
     
     my $desc="";
     my $player = lookupPlayer($s_addr, $pUserId, $playerUniqueId);
@@ -549,7 +553,7 @@ sub doEvent_Disconnect
     
     if ($player)
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && (($player->{is_bot} == 1) || ($pUserId < 1)))
+        if ($player->{is_bot} == 1)
         {
             $player->updateDB();
             removePlayer($s_addr, $pUserId, $playerUniqueId);
@@ -642,6 +646,7 @@ sub doEvent_Disconnect
 sub doEvent_Clan
 {
     my ($playerId, $playerUniqueId, $clantag) = @_;
+    my $result;
     if (defined $clantag) {
         $clantag =~ s/[\x00-\x1f\x7f]//g;
         $clantag = utf8_text($clantag);
@@ -725,7 +730,7 @@ sub doEvent_Clan
 
 sub doEvent_Suicide
 {    
-    my ($playerId, $playerUniqueId, $weapon, $x, $y, $z) = @_;
+    my ($playerId, $playerUniqueId, $weapon, $x, $y, $z, %properties) = @_;
     
     my $desc="";
     my $player = lookupPlayer($s_addr, $playerId, $playerUniqueId);
@@ -751,7 +756,7 @@ sub doEvent_Suicide
     }
     else
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if ($player->{is_bot} == 1)
         {
             $desc = "(IGNORED) BOT: ";
         } else {
@@ -794,6 +799,7 @@ sub doEvent_Suicide
             $player->increment("skill", $suicide_penalty);
             $player->increment("session_suicides");
             $player->increment("session_skill", $suicide_penalty);
+            match_suicide($player, $suicide_penalty) if $g_servers{$s_addr}->{match_live};
             $player->increment("map_suicides");
             $g_servers{$s_addr}->increment("suicides");
             $g_servers{$s_addr}->increment("total_suicides");
@@ -812,6 +818,7 @@ sub doEvent_Suicide
 sub doEvent_TeamSelection
 {
     my ($playerId, $playerUniqueId, $team) = @_;
+    my $old_team;
     
     my $desc="";
     my $player = lookupPlayer($s_addr, $playerId, $playerUniqueId);
@@ -819,7 +826,7 @@ sub doEvent_TeamSelection
     
     if ($player)
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if ($player->{is_bot} == 1)
         {
             $player->set("team", $team);
             $desc = "(IGNORED) BOT: ";
@@ -865,7 +872,7 @@ sub doEvent_RoleSelection
     
     if ($player)
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if ($player->{is_bot} == 1)
         {
             $player->set("role", $role);
             $desc = "(IGNORED) BOT: ";
@@ -906,7 +913,7 @@ sub doEvent_ChangeName
     
     if ($player)
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if ($player->{is_bot} == 1)
         {
             $player->updateDB();
             removePlayer($s_addr, $playerId, $playerUniqueId);
@@ -945,6 +952,7 @@ sub doEvent_ChangeName
 
 sub doEvent_Frag
 {
+    my ($coords, $k_name, $k_skill, $rcmd, $v_name, $v_skill);
     $rcmd = $g_servers{$s_addr}->{broadcasting_command};
 
     my ($killerId, $killerUniqueId, $victimId, $victimUniqueId, $weapon, $headshot, $x, $y, $z, $vx, $vy, $vz, %properties) = @_;
@@ -1367,6 +1375,7 @@ sub doEvent_Frag
 sub doEvent_PlayerPlayerAction
 {
     my ($playerId, $playerUniqueId, $victimId, $victimUniqueId, $action, $x, $y, $z, $vx, $vy, $vz, %properties) = @_;
+    my ($coords, $rcmd);
     $rcmd = $g_servers{$s_addr}->{broadcasting_command};
     
     my $desc="";
@@ -1538,6 +1547,7 @@ sub doEvent_PlayerPlayerAction
 
 sub doEvent_PlayerAction
 {
+    my ($coords, $p_name, $p_skill, $rcmd);
     $rcmd = $g_servers{$s_addr}->{broadcasting_command};
     my ($playerId, $playerUniqueId, $action, $x, $y, $z, %properties) = @_;
     my $reason="";
@@ -1812,6 +1822,7 @@ sub doEvent_PlayerAction
 
 sub doEvent_TeamAction
 {
+    my $rcmd;
     $rcmd = $g_servers{$s_addr}->{broadcasting_command};
     my ($team, $action, %properties) = @_;
     my $desc="";
@@ -1987,6 +1998,9 @@ sub doEvent_WorldAction
 sub doEvent_Chat
 {
     my ($msg_type, $playerId, $playerUniqueId, $message) = @_;
+    my ($acc, $admin_msg, $cmd_accuracy, $cmd_actions, $cmd_cheaters, $cmd_clans, $cmd_help, $cmd_kills, $cmd_load,
+        $cmd_maps, $cmd_players, $cmd_servers, $cmd_statsme, $cmd_status, $cmd_str, $cmd_targets, $cmd_weapons,
+        $hlx_command, $hpk, $kd, $msg, $osd_string, $rcmd, $time, $userid);
     $rcmd = $g_servers{$s_addr}->{player_command};
     
     my $player = lookupPlayer($s_addr, $playerId, $playerUniqueId);
@@ -2139,7 +2153,7 @@ sub doEvent_Chat
             if ($player->{display_events} == 1) {
                 $cmd_str = $rcmd." $p_userid ".$g_servers{$s_addr}->quoteparam("'$playerName' is now $hidedesc the rankings");
             }  
-            $g_servers{$s_addr}->dorcon($cmd_str);
+            $g_servers{$s_addr}->dorcon($cmd_str) if $cmd_str;
         }
         
         if (($message =~ /^\/?hlx_auto ([^ ]+) ([^ ]+)$/i) || ($message =~ /^\/?hlx_auto_cmd ([^ ]+) ([^ ]+)$/i)) {
@@ -2174,7 +2188,7 @@ sub doEvent_Chat
                     if ($player->{display_events} == 1) {
                         $cmd_str = $rcmd." $p_userid ".$g_servers{$s_addr}->quoteparam("Set auto command to ".$player->{"auto_command"}." on ".$player->{"auto_type"}."!");
                     }  
-                    $g_servers{$s_addr}->dorcon($cmd_str);
+                    $g_servers{$s_addr}->dorcon($cmd_str) if $cmd_str;
                 }
             }
         }
@@ -2185,7 +2199,7 @@ sub doEvent_Chat
             if ($player->{display_events} == 1) {
                 $cmd_str = $rcmd." $p_userid ".$g_servers{$s_addr}->quoteparam("Auto command is disabled!");
             }  
-            $g_servers{$s_addr}->dorcon($cmd_str);
+            $g_servers{$s_addr}->dorcon($cmd_str) if $cmd_str;
         }
 
         ### Begin switching team balance
@@ -2206,7 +2220,7 @@ sub doEvent_Chat
                             $cmd_str = $rcmd." $p_userid ".$g_servers{$s_addr}->quoteparam($admin_msg);
                         }
                     }
-                    $g_servers{$s_addr}->dorcon($cmd_str);
+                    $g_servers{$s_addr}->dorcon($cmd_str) if $cmd_str;
                 } elsif ($mode == 1)  {
                     $g_servers{$s_addr}->set("ba_enabled", 1);
                     $admin_msg = "AUTO-TEAM BALANCER enabled";
@@ -2217,7 +2231,7 @@ sub doEvent_Chat
                             $cmd_str = $rcmd." $p_userid ".$g_servers{$s_addr}->quoteparam($admin_msg);
                         }
                     }
-                    $g_servers{$s_addr}->dorcon($cmd_str);
+                    $g_servers{$s_addr}->dorcon($cmd_str) if $cmd_str;
                 }
             }
         }
@@ -2782,6 +2796,11 @@ sub doEvent_ChangeMap
 
     if ($type eq "loading")
     {
+        # A game server answers nothing while it loads a map, and the daemon would wait 2 seconds for each answer:
+        # no status question for the next 25 seconds (its log says when the map has started), and no clean-up of
+        # its players for 30
+        $g_servers{$s_addr}->{last_check}   = time() + 20;
+        $g_servers{$s_addr}->{next_timeout} = $ev_daemontime + 30 if $g_servers{$s_addr}->{next_timeout} < $ev_daemontime + 30;
         while (my($pl, $player) = each(%{$g_servers{$s_addr}->{"srv_players"}}) )
         {
             if ($player->{is_bot} == 1)
@@ -2841,6 +2860,7 @@ sub doEvent_ChangeMap
 sub doEvent_Rcon
 {
     my ($type, $command, $password, $ipAddr) = @_;
+    my $desc;
     
     if ($g_rcon_record)
     {
@@ -2896,7 +2916,7 @@ sub doEvent_Statsme
     }
     elsif ($player)
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if (($g_servers{$s_addr}->{ignore_bots} != 0) && ($player->{is_bot} == 1))
         {
             $desc = "(IGNORED) BOT: ";
         } else {
@@ -2984,7 +3004,7 @@ sub doEvent_Statsme2
     }
     elsif ($player)
     {
-        if (($g_servers{$s_addr}->{ignore_bots} == 1) && ($player->{is_bot} == 1))
+        if (($g_servers{$s_addr}->{ignore_bots} != 0) && ($player->{is_bot} == 1))
         {
             $desc = "(IGNORED) BOT: ";
         } else {
@@ -3095,6 +3115,7 @@ sub doEvent_Kill_Loc
 sub doEvent_ApiReqestPlayerInfo
 {
     my ($playerId, $playerUniqueId, $queryId) = @_;
+    my ($cmd_str, $player_str, $rcmd);
 
     my $desc="";
     my $player = lookupPlayer($s_addr, $playerId, $playerUniqueId);

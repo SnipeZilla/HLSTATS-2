@@ -8,8 +8,12 @@
 # 
 # For current support and updates, visit: https://snipezilla.com or https://github.com/SnipeZilla
 
+use strict;
+
+our ($g_version, %g_eventTables, $dbh, $db_driver, $db_name, $db_host, $db_user, $db_pass, $s_addr, $g_stdin, $g_debug);
+
 # HLstatsZ release version number
-$g_version = "2.5.19";
+$g_version = "2.5.20";
 
 my %stmt_cache = ();
 %g_eventTables = (
@@ -22,7 +26,7 @@ my %stmt_cache = ();
     "ChangeTeam",
         ["playerId", "team"],
     "Connects",
-        ["playerId", "ipAddress", "hostname", "hostgroup"],
+        ["playerId", "ipAddress"],
     "Disconnects",
         ["playerId"],
     "Entries",
@@ -76,11 +80,11 @@ sub utf8_text
         my $bytes = $text;
         utf8::downgrade($bytes, 1) or return $text;
         my $copy    = $bytes;
-        my $decoded = eval { Encode::decode('UTF-8', $copy, Encode::FB_CROAK) };
+        my $decoded = eval { Encode::decode('UTF-8', $copy, Encode::FB_CROAK()) };
         # Not UTF-8 ("Café" as decoded Latin-1 text): it was text already
         return defined $decoded ? $decoded : $text;
     }
-    return Encode::decode('UTF-8', $text, Encode::FB_DEFAULT);
+    return Encode::decode('UTF-8', $text, Encode::FB_DEFAULT());
 }
 
 sub quote_sql {
@@ -135,40 +139,55 @@ sub DB_connect {
         if ($dbh) {
             $dbh->do("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci") unless $db_driver eq 'mariadb';
             printEvent("MYSQL", "Connected to '$db_name' on '$db_host' as '$db_user' with $db_driver", 1);
+            %stmt_cache = ();
             return 1;
         }
 
         printEvent("MYSQL", "Connection attempt $attempt failed: $DBI::errstr", 1);
         sleep(5);
     }
+    die "Failed to connect to DB after 3 attempts.";
+    }
 
-    die "Failed to connect to DB after $attempt attempts.";
+# The statement that just failed was not run because the connection to the server is lost
+sub db_lost {
+    my $err = $DBI::err // 0;
+    # cannot connect, server gone, connection lost, server shutting down, connection killed, closed for inactivity
+    return scalar grep { $err == $_ } 2002, 2003, 2006, 2013, 2055, 1053, 1927, 4031;
 }
 
 
 sub query_now {
     my ($sql, @bind) = @_;
-    DB_connect();
 
     my $sth = $dbh->prepare($sql);
     unless ($sth) {
         printEvent("MYSQL", "Prepare failed:\n$sql\n$DBI::errstr", 1);
         return;
     }
-    $sth->execute(@bind);
+    if (!$sth->execute(@bind) && db_lost()) {
+        # Once more when the connection is back
+        DB_connect();
+        $sth = $dbh->prepare($sql) or return;
+        $sth->execute(@bind);
+    }
     return $sth
 }
 
 sub exec_now {
     my ($sql, @bind) = @_;
-    DB_connect();
-    $dbh->do($sql, undef, @bind);
+    my $rows = $dbh->do($sql, undef, @bind);
+    if (!defined $rows && db_lost()) {
+        # Once more when the connection is back
+        DB_connect();
+        $rows = $dbh->do($sql, undef, @bind);
+    }
+    return $rows;
 }
 
 
 sub exec_cache {
     my ($query_id, $sql, @bind) = @_;
-    DB_connect();
 
     unless ($stmt_cache{$query_id}) {
         $stmt_cache{$query_id} = $dbh->prepare($sql);
@@ -179,9 +198,12 @@ sub exec_cache {
     }
 
     unless ($stmt_cache{$query_id}->execute(@bind)) {
+        my $lost = db_lost();
         printEvent("MYSQL", "Execute failed ($query_id):\n$sql\n$DBI::errstr", 1);
         printEvent("MYSQL", print join(', ', @bind), 1);
         delete $stmt_cache{$query_id};
+        # Once more when the connection is back
+        DB_connect() if $lost;
 
         $stmt_cache{$query_id} = $dbh->prepare($sql);
         if ($stmt_cache{$query_id} && $stmt_cache{$query_id}->execute(@bind)) {
@@ -196,154 +218,6 @@ sub exec_cache {
 }
 
 #
-# string resolveIp (string ip, boolean quiet)
-#
-# Do a DNS reverse-lookup on an IP address and return the hostname, or empty
-# string on error.
-#
-
-sub resolveIp
-{
-    my ($ip, $quiet) = @_;
-    my ($host) = "";
-    
-    unless ($g_dns_resolveip)
-    {
-        return "";
-    }
-    
-    
-    eval
-    {
-        $SIG{ALRM} = sub { die "DNS Timeout\n" };
-        alarm $g_dns_timeout;    # timeout after $g_dns_timeout sec
-        $host = gethostbyaddr(inet_aton($ip), AF_INET);
-        alarm 0;
-    };
-    
-    if ($@)
-    {
-        my $error = $@;
-        chomp($error);
-        printEvent("DNS", "Resolving hostname (timeout $g_dns_timeout sec) for IP \"$ip\" - $error ", 1);
-        $host = "";        # some error occurred
-    }
-    elsif (!defined($host))
-    {
-        printEvent("DNS", "Resolving hostname (timeout $g_dns_timeout sec) for IP \"$ip\" - No Host ", 1);
-        $host = "";        # ip did not resolve to any host
-    } else {
-        $host = lc($host);    # lowercase
-        printEvent("DNS", "hostname resolved for IP \"$ip\" - $host ", 1);
-    }
-    chomp($host);
-    return $host;
-}
-
-
-#
-# object queryHostGroups ()
-#
-# Returns result identifier.
-#
-
-sub queryHostGroups
-{
-    return query_now("
-        SELECT
-            pattern,
-            name,
-            LENGTH(pattern) AS patternlength
-        FROM
-            hlstats_HostGroups
-        ORDER BY
-            patternlength DESC,
-            pattern ASC
-    ");
-}
-
-
-#
-# string getHostGroup (string hostname[, object result])
-#
-# Return host group name if any match, or last 2 or 3 parts of hostname.
-#
-
-sub getHostGroup
-{
-    my ($hostname, $result) = @_;
-    my $hostgroup = "";
-    
-    # User can define special named hostgroups in hlstats_HostGroups, i.e.
-    # '.adsl.someisp.net' => 'SomeISP ADSL'
-    
-    $result = &queryHostGroups()  unless ($result);
-    $result->execute();
-    
-    while (my($pattern, $name) = $result->fetchrow_array())
-    {
-        $pattern = quotemeta($pattern);
-        $pattern =~ s/\\\*/[^.]*/g;    # allow basic shell-style globbing in pattern
-        if ($hostname =~ /$pattern$/)
-        {
-            $hostgroup = $name;
-            last;
-        }
-    }
-    $result->finish;
-    
-    if (!$hostgroup)
-    {
-        #
-        # Group by last 2 or 3 parts of hostname, i.e. 'max1.xyz.someisp.net' as
-        # 'someisp.net', and 'max1.xyz.someisp.net.nz' as 'someisp.net.nz'.
-        # Unfortunately some countries do not have categorical SLDs, so this
-        # becomes more complicated. The dom_nosld array below contains a list of
-        # known country codes that do not use categorical second level domains.
-        # If a country uses SLDs and is not listed below, then it will be
-        # incorrectly grouped, i.e. 'max1.xyz.someisp.yz' will become
-        # 'xyz.someisp.yz', instead of just 'someisp.yz'.
-        #
-        # Please mail sgarner@hlstats.org with any additions.
-        #
-        
-        my @dom_nosld = (
-            "ca", # Canada
-            "ch", # Switzerland
-            "be", # Belgium
-            "de", # Germany
-            "ee", # Estonia
-            "es", # Spain
-            "fi", # Finland
-            "fr", # France
-            "ie", # Ireland
-            "nl", # Netherlands
-            "no", # Norway
-            "ru", # Russia
-            "se", # Sweden
-        );
-        
-        my $dom_nosld = join("|", @dom_nosld);
-        
-        if ($hostname =~ /([\w-]+\.(?:$dom_nosld|\w\w\w))$/)
-        {
-            $hostgroup = $1;
-        }
-        elsif ($hostname =~ /([\w-]+\.[\w-]+\.\w\w)$/)
-        {
-            $hostgroup = $1;
-        }
-        else
-        {
-            $hostgroup = $hostname;
-        }
-    }
-    
-    return $hostgroup;
-}
-
-
-#
 # void doConf (object conf, hash directives)
 #
 # Walk through configuration directives, setting values of global variables.
@@ -352,8 +226,9 @@ sub getHostGroup
 sub doConf
 {
     my ($conf, %directives) = @_;
+    no strict 'refs';    # each directive names the global variable it sets
     
-    while (($directive, $variable) = each(%directives))
+    while (my ($directive, $variable) = each(%directives))
     {
         if ($directive eq "Servers") {
            %$variable = $conf->get($directive);
@@ -373,8 +248,9 @@ sub doConf
 sub setOptionsConf
 {
     my (%optionsconf) = @_;
+    no strict 'refs';    # each option names the global variable it sets
     
-    while (($thekey, $theval) = each(%optionsconf))
+    while (my ($thekey, $theval) = each(%optionsconf))
     {
         if($theval)
         {

@@ -53,9 +53,11 @@ require "$opt_libdir/BASTARDrcon.pm";
 require "$opt_libdir/HLstats_Server.pm";
 require "$opt_libdir/HLstats_Player.pm";
 require "$opt_libdir/HLstats_Game.pm";
-do "$opt_libdir/HLstats_GameConstants.plib";
-do "$opt_libdir/HLstats.plib";
-do "$opt_libdir/HLstats_EventHandlers.plib";
+
+for my $plib (qw(HLstats_GameConstants HLstats HLstats_EventHandlers)) {
+    do "$opt_libdir/$plib.plib";
+    die "\n$plib.plib: $@\n" if $@;
+}
 
 $|=1;
 Getopt::Long::Configure ("bundling");
@@ -64,6 +66,7 @@ binmode(STDOUT, ":utf8");
 binmode(STDIN, ":utf8");
 
 our $s_addr = '';
+our $g_replay = 0;    # a log line that waited for the map of its server is handled (replayLine)
 
 our ($opt_help, $opt_version);
 our ($db_host, $db_user, $db_pass, $db_name, $db_driver);
@@ -71,12 +74,13 @@ our ($path_perl, $path_awards, $path_bans);
 our ($s_ip, $s_port);
 our $dbh;
 our $g_version;
-our ($g_mailto, $g_mailpath, $g_mode, $g_deletedays, $g_requiremap);
+our ($g_mode, $g_deletedays);
 our ($g_debug, $g_nodebug, $g_rcon, $g_rcon_ignoreself, $g_rcon_record);
 our ($g_stdin, $g_server_ip, $g_server_port, $g_timestamp, $g_cpanelhack);
 our ($g_event_queue_size);
+our ($g_profile);
 our ($g_skill_maxchange, $g_skill_minchange, $g_skill_ratio_cap);
-our ($g_geoip_binary, $g_player_minkills, $g_onlyconfig_servers, $g_track_stats_trend);
+our ($g_player_minkills, $g_onlyconfig_servers, $g_track_stats_trend);
 our ($g_global_banning, $g_log_chat, $g_log_chat_admins, $g_global_chat);
 our ($g_ranktype, $g_gi);
 our (%g_servers, %g_games, %g_config_servers, %g_eventTables);
@@ -326,7 +330,7 @@ sub flushEventTable {
 #
 # Counters: kills and headshots per weapon and per map, actions, roles.
 #
-# counter_add() adds to a total kept in memory; counters_flush() writes the totals every 3 seconds with one
+# counter_add() adds to a total kept in memory; counters_flush() writes the totals every 15 seconds with one
 # statement per weapon, map, action or role, instead of one statement for every kill.
 #
 our %g_counters;    # kind => game => code => [n1, n2, n3, failed writes]
@@ -661,11 +665,11 @@ sub getClanId {
         my $re = qr/$rx/i;
 
         if (($position eq 'START' || $position eq 'EITHER') && $name =~ /^($re)(.+)/) {
-            ($clanTag, $clanName) = ($1, $2);
+            ($clanTag, $clanName) = ($1, $1);
             last;
         }
         if (($position eq 'END' || $position eq 'EITHER') && $name =~ /(.+)($re)$/) {
-            ($clanName, $clanTag) = ($1, $2);
+            ($clanTag, $clanName) = ($2, $2);
             last;
         }
     }
@@ -674,6 +678,7 @@ sub getClanId {
 
     $clanTag  = utf8_text($clanTag);
     $clanName = utf8_text($clanName);
+    $clanName =~ s/^\[([^\]]*)\]$/$1/;
 
     my $sql_check = q{
         SELECT clanId FROM hlstats_Clans WHERE tag=? AND game=? LIMIT 1
@@ -691,7 +696,7 @@ sub getClanId {
             ON DUPLICATE KEY UPDATE
                 clanId = LAST_INSERT_ID(clanId)
         };
-        exec_now($sql_ins, $clanTag, $clanTag, $g_servers{$s_addr}->{game});
+        exec_now($sql_ins, $clanTag, $clanName, $g_servers{$s_addr}->{game});
         my $clanid = $dbh->last_insert_id(undef, undef, undef, undef);
         printEvent("MYSQL", qq{Created/fetched clan <C:$clanid> with tag "$clanTag"}, 4);
         return $clanid + 0;
@@ -834,6 +839,8 @@ sub getServerMod
     # Order matters: more-specific patterns must precede their prefixes.
     my @gamename_map = (
         [ qr/^Counter-Strike$/i,   'cstrike'     ],
+        [ qr/^Counter-Strike 2/i,  'cs2'         ],
+        [ qr/^Counter-Strike: Global Offensive/i, 'csgo' ],
         [ qr/^Counter-Strike/i,    'css'         ],
         [ qr/^Team Fortress C/i,   'tfc'         ],
         [ qr/^Team Fortress/i,     'tf'          ],
@@ -1160,14 +1167,24 @@ sub getPlayerInfo
             }
         }
         
+        # A player whom the last look through the server's players found alone with his id is not looked for
+        # again at every line that names him (steamid mode: there an id never changes)
+        if (!$haveplayer && $g_mode eq "Normal") {
+            my $known = $g_servers{$s_addr}->{"srv_players"}->{"$userid/$uniqueid"};
+            $haveplayer = 1 if $known && $known->{only_one} && $known->{uniqueid} eq $uniqueid && $known->{userid} == $userid;
+        }
+
         if (!$haveplayer)
         {
+            my $same = 0;
             while ( my ($index, $player) = each(%{$g_servers{$s_addr}->{"srv_players"}}) ) {
                 # Cannot exit loop early as more than one player can exist with same uniqueid
                 # (bug? or just bad logging)
                 # Either way, we disconnect any that don't match the current line
                 if ($player->{uniqueid} eq $uniqueid) {
                     $haveplayer = 1;
+                    $same++;
+                    delete $player->{only_one};
                     # Catch players reconnecting without first disconnecting
                     if ($player->{userid} != $userid) {
                         doEvent_Disconnect(
@@ -1178,6 +1195,11 @@ sub getPlayerInfo
                         $haveplayer = 0;
                     }
                 }
+            }
+            # Alone with his id: remembered for the next lines
+            if ($haveplayer && $same == 1 && $g_mode eq "Normal") {
+                my $known = $g_servers{$s_addr}->{"srv_players"}->{"$userid/$uniqueid"};
+                $known->{only_one} = 1 if $known && $known->{uniqueid} eq $uniqueid && $known->{userid} == $userid;
             }
         }
         
@@ -1226,7 +1248,7 @@ sub getPlayerInfo
                         team => $team,
                         role => $role,
                         is_bot => $bot,
-                        display_events => 1,
+                        display_events => $g_servers{$s_addr}->{default_display_events},
                         address => (($preIpAddr ne "") ? $preIpAddr : $ipAddr // '')
                     );
                     if ($preIpAddr ne "") {
@@ -1249,7 +1271,8 @@ sub getPlayerInfo
                         name => substr($name,0,64),
                         team => $team,
                         role => $role,
-                        is_bot => $bot
+                        is_bot => $bot,
+                        display_events => $g_servers{$s_addr}->{default_display_events}
                     );
                     delete($g_lan_noplayerinfo{"$s_addr/$userid/$name"});
                     # Increment number of players on server
@@ -1503,44 +1526,47 @@ sub readDatabaseConfig()
         printEvent("S_CONFIG", $addr, 1);
     }
 
-    #  GeoIP setup
-    if ($g_geoip_binary > 0 && !defined $g_gi) {
-        my $geoipfile = "$opt_libdir/GeoLiteCity/GeoLite2-City.mmdb";
-        if (-r $geoipfile) {
-            eval "use GeoIP2::Database::Reader";
-            my $hasGeoIP = $@ ? 0 : 1;
-            if ($hasGeoIP) {
-                $g_gi = GeoIP2::Database::Reader->new(
-                    file    => $geoipfile,
-                    locales => ['en']
-                );
-            } else {
-                printEvent("ERROR", "GeoIP binary lookup but module not found", 1);
-                $g_gi = undef;
-            }
-        } else {
-            printEvent("ERROR", "GeoIP file $geoipfile not found", 1);
-            $g_gi = undef;
-        }
-    } elsif ($g_geoip_binary == 0 && defined $g_gi) {
-        $g_gi->close();
-        $g_gi = undef;
+    # GeoIP: opened at each (re)load of the configuration
+    $g_gi = undef;
+    my $geoipfile = "$opt_libdir/GeoLiteCity/GeoLite2-City.mmdb";
+    if (!-r $geoipfile) {
+        printEvent("ERROR", "GeoIP file $geoipfile not found", 1);
+    } elsif (!eval { require GeoIP2::Database::Reader; 1 }) {
+        printEvent("ERROR", "GeoIP binary lookup but module not found", 1);
+    } else {
+        $g_gi = eval { GeoIP2::Database::Reader->new(file => $geoipfile, locales => ['en']) };
+        printEvent("ERROR", "GeoIP file $geoipfile cannot be read: " . ($@ =~ s/\s+\z//r), 1) unless $g_gi;
     }
-} 
+}
 
 sub getLine
 {
     return <STDIN>;
 }
 
+# A log line that waited for the map of its server (HLstats_Server::hold_lines)
+sub replayLine
+{
+    my ($source, $addr, $line) = @_;
+    local $s_addr   = $addr;
+    local $g_replay = 1;
+    handleIncoming($source, $line);
+}
+
+# The date and time of the last log line, as written in it, and what timelocal() made of them
+my ($ev_stamp, $ev_stamp_time) = ('', 0);
+
 sub handleIncoming
 {
     my ($source, $s_output) = @_;
     return unless defined $s_output;
-    $s_output =~ s/^\s+|\s+$//g;
+    $s_output =~ s/^\s+//;
+    $s_output =~ s/\s+$//;
     return unless length $s_output;
     my($s_peerhost, $s_peerport) = split(/:/, $s_addr);
-    printEvent($source, $s_output,2);
+    my ($raw_addr, $raw_line) = ($s_addr, $s_output);    # as they came: for a line that has to wait (hold_line)
+    my $new_server = 0;
+    printEvent($source, $s_output,2) unless $g_replay;
     # Proxy filter
     if (($s_output =~ /^.*PROXY Key=(.+) (.*)PROXY.+/) && $proxy_key ne "") {
         $rproxy_key = $1;
@@ -1634,7 +1660,13 @@ sub handleIncoming
         $ev_min   = $5;
         $ev_sec   = $6;
         $ev_time  = "$ev_hour:$ev_min:$ev_sec";
-        $ev_remotetime  = timelocal($ev_sec,$ev_min,$ev_hour,$ev_day,$ev_month-1,$ev_year);
+        # Most lines are of the same second as the line before: its time is worked out once
+        my $stamp = "$ev_year$ev_month$ev_day$ev_time";
+        if ($stamp ne $ev_stamp) {
+            $ev_stamp_time = timelocal($ev_sec,$ev_min,$ev_hour,$ev_day,$ev_month-1,$ev_year);
+            $ev_stamp      = $stamp;
+        }
+        $ev_remotetime  = $ev_stamp_time;
 
         if ($g_timestamp) {
             my ($sec,$min,$hour,$mday,$mon,$year) = localtime($ev_unixtime);
@@ -1700,6 +1732,7 @@ sub handleIncoming
             return if ($tempsrv == 0);
     
             $g_servers{$s_addr} = $tempsrv;
+            $new_server = 1;
             my %s_cfg = %{$g_config_servers{$s_addr}};
     
             # Basic fields
@@ -1721,16 +1754,16 @@ sub handleIncoming
                 $g_servers{$s_addr}->set("show_stats",  0);
                 printEvent("SERVER", "Showing stats is disabled", 1); 
             }
-            # Broadcasting group
+            # Broadcasting group. The plugin's commands are set whatever BroadCastEvents is: ShowStats and
+            # ConnectAnnounce use them too
+            $g_servers{$s_addr}->set("broadcasting_command", $s_cfg{"BroadCastEventsCommand"});
+            if ($s_cfg{"BroadCastEventsCommandAnnounce"} eq "ma_hlx_csay") {
+                $s_cfg{"BroadCastEventsCommandAnnounce"} = $s_cfg{"BroadCastEventsCommandAnnounce"}." #all";
+            }
+            $g_servers{$s_addr}->set("broadcasting_command_announce", $s_cfg{"BroadCastEventsCommandAnnounce"});
             if ($s_cfg{"BroadCastEvents"} == 1) {
                 $g_servers{$s_addr}->set("broadcasting_events",  1);
                 $g_servers{$s_addr}->set("broadcasting_player_actions",  $s_cfg{"BroadCastPlayerActions"});
-                $g_servers{$s_addr}->set("broadcasting_command", $s_cfg{"BroadCastEventsCommand"});
-    
-                if ($s_cfg{"BroadCastEventsCommandAnnounce"} eq "ma_hlx_csay") {
-                    $s_cfg{"BroadCastEventsCommandAnnounce"} = $s_cfg{"BroadCastEventsCommandAnnounce"}." #all";
-                }
-                $g_servers{$s_addr}->set("broadcasting_command_announce", $s_cfg{"BroadCastEventsCommandAnnounce"});
     
                 printEvent("SERVER", "Broadcasting Live-Events with \"".$s_cfg{"BroadCastEventsCommand"}."\" is enabled", 1); 
                 if ($s_cfg{"BroadCastEventsCommandAnnounce"} ne "") {
@@ -1882,6 +1915,14 @@ sub handleIncoming
         }
     }
 
+    # The first lines of a game server wait for its map: it is asked without waiting, and they are handled when the
+    # answer comes (replayLine), in the order they came. The daemon goes on with the other servers meanwhile.
+    $g_servers{$s_addr}->hold_lines() if $new_server;
+    if ($g_servers{$s_addr}->{holding}) {
+        $g_servers{$s_addr}->hold_line($source, $raw_addr, $raw_line);
+        return;
+    }
+
     $g_servers{$s_addr}->set("last_event", $ev_unixtime);
 
     # Now we parse the events.
@@ -2014,7 +2055,7 @@ sub handleIncoming
             my $killer         = lookupPlayer($s_addr, $killerId, $killerUniqueId);
 
             # octo
-            if($killer->{role} eq "scout") {
+            if($killer && $killer->{role} eq "scout") {
                 $ev_status = doEvent_PlayerAction(
                     $killerinfo->{"userid"},
                     $killerinfo->{"uniqueid"},
@@ -2022,7 +2063,7 @@ sub handleIncoming
                     "kill_as_scout"
                 );
             }
-            if($killer->{role} eq "spy") {
+            if($killer && $killer->{role} eq "spy") {
                 $ev_status = doEvent_PlayerAction(
                     $killerinfo->{"userid"},
                     $killerinfo->{"uniqueid"},
@@ -2474,7 +2515,8 @@ sub handleIncoming
                     $ev_obj_a,
                     $ev_Xcoord,
                     $ev_Ycoord,
-                    $ev_Zcoord
+                    $ev_Zcoord,
+                    %ev_properties
                 );
             }
         } elsif ($ev_verb eq "joined team") {
@@ -3088,6 +3130,55 @@ EOT
     }
 }
 
+#
+# void cleanupPlayers (string server, object server, hashref players, arrayref asked, hash status)
+#
+# The clean-up of handleData, once the game server has listed its players (rcon status): the players it does
+# not list are taken off, the others get their ping and their address. $players: the players of the server when
+# it was asked. $asked: only when the daemon did not wait for the answer, [last_check, map] of the server when
+# it was asked.
+#
+
+sub cleanupPlayers
+{
+    my ($server, $srv, $players_temp, $asked, %status_players) = @_;
+
+    # The server was taken off, or read again from the database, while its answer was on its way
+    return unless $srv && blessed($g_servers{$server}) && $g_servers{$server} == $srv;
+    if ($asked) {
+        $ev_unixtime   = time();
+        $ev_daemontime = $ev_unixtime;
+    }
+
+    if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} >= 3 ) {
+        # remove idling players
+        printEvent("RCON", "status - Updating players list...",3, $server);
+        keys %$players_temp;
+        while (my ($pl, $player) = each %$players_temp) {
+            my $userid    = $player->{userid};
+            my $uniqueid  = $player->{uniqueid};
+            # He left, or is another player object now, while the answer was on its way
+            next if $asked && ($g_servers{$server}->{srv_players}->{"$userid/$uniqueid"} // 0) != $player;
+            my $key       = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
+            if (!defined($status_players{$key})) {
+                printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3, $server);
+                removePlayer($server, $userid, $uniqueid);
+            } elsif ( $player->{is_bot} == 0 ) { 
+                $player->{ping} = $status_players{$key}->{Ping} if ($status_players{$key}->{Ping} > 0);
+                if ( $status_players{$key}->{Address} && $player->{address} ne $status_players{$key}->{Address} ) {
+                    $player->{address} = $status_players{$key}->{Address};
+                    $player->geoLookup();
+                    $player->flushDB();
+                }
+            }
+        }
+        # update map/hostname
+        # (not from an answer that is older than a map change the log told of meanwhile)
+        $g_servers{$server}->get_map($status_players{"host"}) if $status_players{"host"}->{"map"}
+            && (!$asked || ($srv->{last_check} == $asked->[0] && $srv->{map} eq $asked->[1]));
+    }
+}
+
 sub handleData
 {
     $ev_unixtime   = time();
@@ -3140,29 +3231,13 @@ sub handleData
                     }
                 }
                 if ($_check == 1 || $_active == 0) {
-                    my %status_players = $g_servers{$server}->rcon_getplayers();
-                    if ( defined $status_players{"host"}->{"name"} || $g_servers{$server}->{rcon_obj}->{rcon_err} >= 3 ) {
-                        # remove idling players
-                        printEvent("RCON", "status - Updating players list...",3, $server);
-                        keys %players_temp;
-                        while (my ($pl, $player) = each %players_temp) {
-                            my $userid    = $player->{userid};
-                            my $uniqueid  = $player->{uniqueid};
-                            my $key       = ($::g_mode eq "NameTrack") ? $player->{name} : ($::g_mode eq "LAN") ? $server : $uniqueid;
-                            if (!defined($status_players{$key})) {
-                                printEvent("PLAYER", "Auto-disconnecting " . $player->{name} ." for idling (" . ($ev_daemontime - $player->{timestamp}) . " sec)",3, $server);
-                                removePlayer($server, $userid, $uniqueid);
-                            } elsif ( $player->{is_bot} == 0 ) { 
-                                $player->{ping} = $status_players{$key}->{Ping} if ($status_players{$key}->{Ping} > 0);
-                                if ( $status_players{$key}->{Address} && $player->{address} ne $status_players{$key}->{Address} ) {
-                                    $player->{address} = $status_players{$key}->{Address};
-                                    $player->geoLookup();
-                                    $player->flushDB();
-                                }
-                            }
-                        }
-                        # update map/hostname
-                        $g_servers{$server}->get_map($status_players{"host"}) if $status_players{"host"}->{"map"};
+                    # The game server is asked for its players without waiting for the answer: cleanupPlayers()
+                    # gets it when it comes.
+                    my $srv   = $g_servers{$server};
+                    my @asked = ($srv->{last_check}, $srv->{map});
+                    Scalar::Util::weaken(my $weak = $srv);
+                    unless ($srv->rcon_getplayers_later(sub { cleanupPlayers($server, $weak, \%players_temp, \@asked, @_) })) {
+                        cleanupPlayers($server, $srv, \%players_temp, undef, $srv->rcon_getplayers());
                     }
                 } elsif ($g_servers{$server}->{map} eq "") {
                     $g_servers{$server}->get_map();
@@ -3231,14 +3306,17 @@ sub run_daily_task {
 
     $$last_run_ref = $yesterday;
 
+    # Started with -n (as the service and the scheduled task do): the daily scripts print nothing either
+    my @quiet = $g_nodebug ? ('-n') : ();
+
     if (!is_windows()) {
         my $pid = fork();
         if ($pid == 0) {
-            exec($path_perl, $path);
+            exec($path_perl, $path, @quiet);
             exit 1;
         }
     } else {
-        system(qq{start "" /B "$path_perl" "$path"});
+        system(qq{start "" /B "$path_perl" "$path" @quiet});
     }
 
     printEvent("CRONJOB", "Daily task executed: $path", 1);
@@ -3278,11 +3356,8 @@ $path_bans = "";
 $s_ip = "";
 $s_port = "27500";
 
-$g_mailto = "";
-$g_mailpath = "/bin/mail";
 $g_mode = "Normal";
 $g_deletedays = 28;
-$g_requiremap = 0;
 $g_debug = 1;
 $g_nodebug = 0;
 $g_rcon = 1;
@@ -3294,10 +3369,10 @@ $g_server_port = 27015;
 $g_timestamp = 0;
 $g_cpanelhack = 0;
 $g_event_queue_size = 50;
+$g_profile = 0;
 $g_skill_maxchange = 100;
 $g_skill_minchange = 2;
 $g_skill_ratio_cap = 0;
-$g_geoip_binary = 0;
 $g_player_minkills = 50;
 $g_onlyconfig_servers = 1;
 $g_track_stats_trend = 0;
@@ -3404,6 +3479,7 @@ if ($opt_configfile && -r $opt_configfile) {
         "DebugLevel",            "g_debug",
         "CpanelHack",            "g_cpanelhack",
         "EventQueueSize",        "g_event_queue_size",
+        "Profile",               "g_profile",
         "PathPerl",              "path_perl",
         "PathAwards",            "path_awards",
         "PathBans",              "path_bans"
@@ -3411,8 +3487,6 @@ if ($opt_configfile && -r $opt_configfile) {
 
     %directives_mysql = (
         "version",                   "g_version",
-        "MailTo",                    "g_mailto",
-        "MailPath",                  "g_mailpath",
         "Mode",                      "g_mode",
         "DeleteDays",                "g_deletedays",
         "UseTimestamp",              "g_timestamp",
@@ -3431,7 +3505,6 @@ if ($opt_configfile && -r $opt_configfile) {
         "GlobalChat",                "g_global_chat",
         "SkillRatioCap",             "g_skill_ratio_cap",
         "rankingtype",               "g_ranktype",
-        "UseGeoIPBinary",            "g_geoip_binary",
         "Proxy_Key",                 "proxy_key"
     );
 
@@ -3457,9 +3530,6 @@ GetOptions(
     "db-name=s"         => \$copts{db_name},
     "db-password=s"     => \$copts{db_pass},
     "db-username=s"     => \$copts{db_user},
-    # No longer used (the daemon does not look up host names), still accepted: an old start command keeps working
-    "dns-resolveip!"    => \my $no_dns_resolveip,
-    "dns-timeout=i"     => \my $no_dns_timeout,
     "ip|i=s"            => \$copts{s_ip},
     "port|p=i"          => \$copts{s_port},
     "rcon!"             => \$copts{g_rcon},
@@ -3491,11 +3561,6 @@ if ($g_cpanelhack) {
     my $base_module_dir = (-d "$home_dir/perl" ? "$home_dir/perl" : ( getpwuid($>) )[7] . '/perl/');
     unshift @INC, map { $base_module_dir . $_ } @INC;
 }
-
-eval {
-  require Geo::IP::PurePerl;
-};
-import Geo::IP::PurePerl;
 
 if ($opt_help) {
     print $usage;
@@ -3554,8 +3619,7 @@ if ($g_mode ne "Normal" && $g_mode ne "LAN" && $g_mode ne "NameTrack") {
     $g_mode = "Normal";
 }
 
-$g_debug -= $g_nodebug;
-$g_debug = 0 if ($g_debug < 0);
+$g_debug = 0 if ($g_debug < 0 || $g_nodebug);
 
 # Startup
 printEvent("HLSTATSZ", "HLstatsZ $g_version starting...", 1);
@@ -3651,7 +3715,8 @@ my $udp_drain_scheduled = 0;
 sub handle_udp {
     $udp_drain_scheduled = 0;
 
-    # Lines until the queue is empty, or for 50 ms (see handle_http)
+    # Lines until the queue is empty, or for 50 ms, then the rest from a timer: the loop reads the network and
+    # answers the UDP requests in between.
     my $until = time() + 0.05;
     while (@UDPQ) {
         my ($addr, $data) = @{ shift @UDPQ };
@@ -3672,9 +3737,8 @@ my $http_drain_scheduled = 0;
 sub handle_http {
     $http_drain_scheduled = 0;
 
-    # Lines until the queue is empty, or for 50 ms, then the rest from a timer: the loop reads the network and
-    # answers the HTTP requests in between. Rescheduled by next_tick it did neither until the whole queue was
-    # handled, so a backlog kept the plugin's requests waiting past their timeout.
+	# Lines until the queue is empty, or for 50 ms, then the rest from a timer: the loop reads the network and
+    # answers the HTTP requests in between.
     my $until = time() + 0.05;
     while (@HTTPQ) {
         my ($addr, $data) = @{ shift @HTTPQ };
@@ -3686,6 +3750,18 @@ sub handle_http {
     if (@HTTPQ) {
         $http_drain_scheduled = 1;
         Mojo::IOLoop->timer(0 => \&handle_http);
+    }
+}
+
+# Profiler: "Profile 1" in hlstats.conf. It writes profile/hlstatsz_profile.log, read with the viewer in that folder
+if (int($g_profile // 0) > 0) {
+    ($@, $!) = ('', 0);
+    if (do "$opt_libdir/hlstatsz_profile.pl") {
+        printEvent("PROFILE", "Profiler is enabled, writing profile/hlstatsz_profile.log", 1);
+    } else {
+        my $why = $@ || $! || "it did not load";
+        $why =~ s/\s+\z//;
+        warn "\nProfiler (Profile 1 in hlstats.conf) not started: hlstatsz_profile.pl: $why\n\n";
     }
 }
 
@@ -3702,8 +3778,6 @@ if ($g_stdin == 0) {
     };
     if ($udp_socket) {
         $udp_socket->blocking(0);
-        # Room for the lines that arrive while the daemon is busy (a slow query, an rcon timeout): the default
-        # receive buffer (64 KB on Windows) overflows within a second during a storm, and those lines are lost
         setsockopt($udp_socket, SOL_SOCKET, SO_RCVBUF, 8 * 1024 * 1024)
             or printEvent("UDP", "Could not enlarge the UDP receive buffer: $!", 1);
         printEvent("UDP", "Opening UDP listen socket on port:$s_port ... OK", 1);
@@ -3716,14 +3790,10 @@ if ($g_stdin == 0) {
             my $peer_addr = recv($udp_socket, $data, 1024, 0);
             return unless defined $data && $peer_addr;
             my ($port, $ip_raw) = sockaddr_in($peer_addr);
-            my $s_peerhost = inet_ntoa($ip_raw);
-            my $addr = "$s_peerhost:$port";
-            push @UDPQ, [$addr, $data];
+            push @UDPQ, [inet_ntoa($ip_raw) . ":$port", $data];
 
-            if (!$udp_drain_scheduled) {
-                $udp_drain_scheduled = 1;
-                 Mojo::IOLoop->next_tick(\&handle_udp);
-            }
+            handle_udp() if !$udp_drain_scheduled;
+
         });
 
         $loop->reactor->watch($udp_socket, 1, 0);
@@ -3747,20 +3817,13 @@ if ($g_stdin == 0) {
             $tx->req->headers->content_type($ct || 'application/octet-stream');
         });
 
-        # Prevent a single bad request from killing the I/O watcher.
-        Mojo::IOLoop->singleton->reactor->unsubscribe('error')->on(error => sub {
-            my ($reactor, $err) = @_;
-            if ($err =~ /^I\/O watcher failed/s) {
-                return; # bad header
-            }
-            printEvent("HTTP", "Reactor error (ignored): $err", 1);
-        });
-
         $daemon->on(request => sub {
             $ev_unixtime   = time();
             $ev_daemontime = $ev_unixtime;
             my ($daemon, $tx) = @_;
             my $addr = $tx->req->headers->header('X-Server-Addr') // ($tx->remote_address . ":" . $tx->remote_port);
+            # A game server that just started does not know its address yet and says 0.0.0.0
+            $addr = $tx->remote_address . ":$1" if $addr =~ /^0\.0\.0\.0:(\d+)$/;
             my $body = $tx->req->body // '';
             $tx->res->code(200);
             $tx->res->headers->content_type('text/plain');
@@ -3775,20 +3838,25 @@ if ($g_stdin == 0) {
                 push @HTTPQ, [$addr, $data];
             }
 
-            if (!$http_drain_scheduled) {
-                $http_drain_scheduled = 1;
-                Mojo::IOLoop->next_tick(\&handle_http);
-            }
+                handle_http() if !$http_drain_scheduled;
         });
 
         $daemon->start(detach => 1);
     }
 
+    # Prevent a single bad request from killing the I/O watcher or print an error
+    Mojo::IOLoop->singleton->reactor->unsubscribe('error')->on(error => sub {
+        my ($reactor, $err) = @_;
+        return if $err =~ /^I\/O watcher failed/s
+               && $err !~ /(?:hlstats\.pl|\.plib|HLstats_\w+\.pm|TRcon\.pm|BASTARDrcon\.pm|hlstatsz_profile\.pl) line \d+/;
+        printEvent("MOJO", "Reactor error (ignored): $err", 1);
+    });
+
     # Handle Data
     Mojo::IOLoop->recurring(3 => sub { handleData() });
 
     # Weapon, map, action and role counters
-    Mojo::IOLoop->recurring(3 => \&counters_flush);
+    Mojo::IOLoop->recurring(15 => \&counters_flush);
 
     # Start HLstatsZ
     Mojo::IOLoop->start unless Mojo::IOLoop->is_running;

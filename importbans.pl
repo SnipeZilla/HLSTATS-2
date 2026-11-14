@@ -25,7 +25,9 @@
 # BeetlesMod and GlobalBan support added by Bo Tribun (R3M)
 
 #######################################################################################
-#  You must fill info out for the HLX DB and at least one of the Bans databases
+#  Fill in at least one of the Bans databases below.
+#  The HLstatsZ database, and the driver for all of them (DBDriver), come from hlstats.conf.
+#  A port other than 3306 needs the server's IP as host (127.0.0.1), not localhost.
 #######################################################################################
 # Sourcebans DB Info
 $sb_dbhost = "localhost";
@@ -56,13 +58,6 @@ $gb_dbuser = "";
 $gb_dbpass = "";
 $gb_dbname = "";
 
-# HLX DB Info
-$hlx_dbhost = "localhost";
-$hlx_dbport = 3306;
-$hlx_dbuser = "";
-$hlx_dbpass = "";
-$hlx_dbname = "";
-
 
 ##
 ##
@@ -71,21 +66,41 @@ $hlx_dbname = "";
 ##
 
 use DBI;
+use FindBin;
+use File::Basename;
+use File::Spec;
+
+# -n, --nodebug: nothing is printed (the daemon passes it when it runs with -n itself). Errors still are, on STDERR.
+open(STDOUT, '>', File::Spec->devnull()) if grep { $_ eq '-n' || $_ eq '--nodebug' } @ARGV;
+
+# The HLstatsZ database: from hlstats.conf, next to this file (or in the folder above, or in the current folder)
+($conffile) = grep { -r $_ } ("$FindBin::Bin/hlstats.conf", "$FindBin::Bin/../hlstats.conf", "./hlstats.conf");
+die("hlstats.conf not found. Exiting\n") unless $conffile;
+require(dirname($conffile) . "/ConfigReaderSimple.pm");
+$conf = ConfigReaderSimple->new($conffile);
+$conf->parse();
+$hlx_dbhost = $conf->get("DBHost") // "";
+$hlx_dbuser = $conf->get("DBUsername") // "";
+$hlx_dbpass = $conf->get("DBPassword") // "";
+$hlx_dbname = $conf->get("DBName") // "";
+# The driver, as for the daemon: DBDriver "mysql" (DBD::mysql) or "mariadb" (DBD::MariaDB)
+$dbi_driver = (($conf->get("DBDriver") // "") eq "mariadb") ? "MariaDB" : "mysql";
 
 $havesbinfo =	($sb_dbhost eq "" || $sb_dbuser eq "" || $sb_dbpass eq "" || $sb_dbname eq "")?0:1;
 $haveamxbinfo =	($amxb_dbhost eq "" || $amxb_dbuser eq "" || $amxb_dbpass eq "" || $amxb_dbname eq "")?0:1;
 $havebminfo =	($bm_dbhost eq "" || $bm_dbuser eq "" || $bm_dbpass eq "" || $bm_dbname eq "")?0:1;
 $havegbinfo =	($gb_dbhost eq "" || $gb_dbuser eq "" || $gb_dbpass eq "" || $gb_dbname eq "")?0:1;
-$havehlxinfo =	($hlx_dbhost eq "" || $hlx_dbuser eq "" || $hlx_dbpass eq "" || $hlx_dbname eq "")?0:1;
+$havehlxinfo =	($hlx_dbhost eq "" || $hlx_dbuser eq "" || $hlx_dbname eq "")?0:1;
 
-die("DB login info incomplete. Exiting\n") if ($havehlxinfo == 0 || ($havesbinfo == 0 && $haveamxbinfo == 0 && $havebminfo == 0 && $havegbinfo == 0));
+die("DBHost, DBUsername and DBName must be set in $conffile. Exiting\n") if ($havehlxinfo == 0);
+die("DB login info incomplete: fill in at least one of the Bans databases. Exiting\n") if ($havesbinfo == 0 && $haveamxbinfo == 0 && $havebminfo == 0 && $havegbinfo == 0);
 
 @steamids = ();
 
 if ($havesbinfo) {
 	print "Connecting to Sourcebans database...\n";
 	my $sb_dbconn = DBI->connect(
-			"DBI:mysql:database=$sb_dbname;host=$sb_dbhost;port=$sb_dbport",
+			dsn($sb_dbname, $sb_dbhost, $sb_dbport),
 			$sb_dbuser, $sb_dbpass) or die ("\nCan't connect to Sourcebans database '$sb_dbname' on '$sb_dbhost'\n" .
 			"Server error: $DBI::errstr\n");
 
@@ -105,7 +120,7 @@ if ($havesbinfo) {
 if ($haveamxbinfo) {
 	print "Connecting to AMXBans database...\n";
 	my $amxb_dbconn = DBI->connect(
-			"DBI:mysql:database=$amxb_dbname;host=$amxb_dbhost;port=$amxb_dbport",
+			dsn($amxb_dbname, $amxb_dbhost, $amxb_dbport),
 			$amxb_dbuser, $amxb_dbpass) or die ("\nCan't connect to AMXBans database '$amxb_dbname' on '$amxb_dbhost'\n" .
 			"Server error: $DBI::errstr\n");
 
@@ -125,7 +140,7 @@ if ($haveamxbinfo) {
 if ($havebminfo) {
 	print "Connecting to BeetlesMod database...\n";
 	my $bm_dbconn = DBI->connect(
-			"DBI:mysql:database=$bm_dbname;host=$bm_dbhost;port=$bm_dbport",
+			dsn($bm_dbname, $bm_dbhost, $bm_dbport),
 			$bm_dbuser, $bm_dbpass) or die ("\nCan't connect to BeetlesMod database '$bm_dbname' on '$bm_dbhost'\n" .
 			"Server error: $DBI::errstr\n");
 
@@ -145,7 +160,7 @@ if ($havebminfo) {
 if ($havegbinfo) {
 	print "Connecting to ES GlobalBan database...\n";
 	my $gb_dbconn = DBI->connect(
-			"DBI:mysql:database=$gb_dbname;host=$gb_dbhost;port=$gb_dbport",
+			dsn($gb_dbname, $gb_dbhost, $gb_dbport),
 			$gb_dbuser, $gb_dbpass) or die ("\nCan't connect to ES GlobalBan database '$gb_dbname' on '$gb_dbhost'\n" .
 			"Server error: $DBI::errstr\n");
 
@@ -171,17 +186,17 @@ if (@steamids) {
 	}
 	$steamidstring =~ s/\,\'$//;
 
-	print "Connecting to HLX:CE database...\n";
+	print "Connecting to HLstatsZ database '$hlx_dbname' on '$hlx_dbhost' with DBD::$dbi_driver...\n";
 	$hlx_dbconn = DBI->connect(
-			"DBI:mysql:database=$hlx_dbname;host=$hlx_dbhost;port=$hlx_dbport",
-			$hlx_dbuser, $hlx_dbpass) or die ("\nCan't connect to HLX:CE database '$hlx_dbname' on '$hlx_dbhost'\n" .
+			dsn($hlx_dbname, $hlx_dbhost),
+			$hlx_dbuser, $hlx_dbpass) or die ("\nCan't connect to HLstatsZ database '$hlx_dbname' on '$hlx_dbhost'\n" .
 			"Server error: $DBI::errstr\n");
-	print "Updating HLX:CE banned players...\n";
+	print "Updating HLstatsZ banned players...\n";
 	$result = &doQuery($hlx_dbconn, "UPDATE `hlstats_Players` SET `hideranking` = 2 WHERE `playerId` IN (SELECT `playerId` FROM hlstats_PlayerUniqueIds WHERE `uniqueId` IN ($steamidstring)) AND `hideranking` < 2");
 	print $result->rows." users newly marked as banned.\n";
 	$hlx_dbconn->disconnect;
 } else {
-	die("No banned users found in database(s). Exiting\n");
+	print "No banned users found in database(s). Exiting\n";
 }
 
 sub doQuery
@@ -191,4 +206,14 @@ sub doQuery
 	$result->execute or die("Unable to execute query:\n$query\n$DBI::errstr\n$callref");
 	
 	return $result;
+}
+
+# The connection string for a database, with the driver from hlstats.conf. The port is only added when it isn't
+# the default 3306: DBD::MariaDB refuses a port with "localhost" (a local socket).
+sub dsn
+{
+	my ($dbname, $dbhost, $dbport) = @_;
+	my $dsn = "DBI:$dbi_driver:database=$dbname;host=$dbhost";
+	$dsn .= ";port=$dbport" if $dbport && $dbport != 3306;
+	return $dsn;
 }
