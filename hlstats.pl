@@ -1394,7 +1394,8 @@ sub like
 sub botidcheck
 { 
     my ($uniqueid) = @_;
-    if ($uniqueid =~ /^BOT/ || ($uniqueid eq "0" && $g_servers{$s_addr}->{play_game} !=  CS2()) || $uniqueid =~ /^00000000\:\d+\:0$/ || $uniqueid =~ /^0:0$/) {
+    if ($uniqueid =~ /^BOT/ || ($uniqueid eq "0" && $g_servers{$s_addr}->{play_game} !=  CS2()) ||
+      $uniqueid =~ /^00000000\:\d+\:0$/ || $uniqueid =~ /^0:0$/ || $uniqueid =~ qr/-\d+/) {
         return 1;
     }
     return 0;

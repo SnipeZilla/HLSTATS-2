@@ -1004,27 +1004,31 @@ sub doEvent_Frag
     my $victimstr = getPlayerInfoString($victim, $victimId);
     my $headshotFromAction = 0;
 
-    if ( ($g_servers{$s_addr}->{broadcasting_events} == 1) && ($g_servers{$s_addr}->{ignore_bots} == 1) && ((($killer->{is_bot} == 1) && ($victim->{is_bot} == 0)) || (($killer->{is_bot} == 0) && ($victim->{is_bot} == 1))) && !checkBonusRound() ) {
-        $desc = "(IGNORED) NOTMINPLAYERS: ";
-        my $k_name = getColor($killer->{name},$killer->{team});
-        my $v_name = getColor($victim->{name},$victim->{team});
-        my $k_userid  = $g_servers{$s_addr}->format_userid($killer->{"userid"});
-        my $v_userid  = $g_servers{$s_addr}->format_userid($victim->{"userid"});
-        my $colorparam = $g_servers{$s_addr}->{format_color};
-        my $msg = sprintf("%s (%s) got 0 points for killing %s (%s)",$k_name,number_format($killer->{"skill"}),$v_name,number_format($victim->{"skill"}));
-        my @rcmds;
-        if (($killer->{is_bot} == 0) && ($killer->{"display_events"} == 1) && ($killer->{playerid} > 0)) {
-            push(@rcmds, sprintf("%s %s%s %s",$rcmd,$k_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg)));
-        }  
-        if (($victim->{is_bot} == 0) && ($victim->{"display_events"} == 1) && ($g_servers{$s_addr}->{play_game} != L4D()) && ($victim->{playerid} > 0) && $isfake == 0) {
-            push(@rcmds, sprintf("%s %s%s %s",$rcmd,$v_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg)));
-        }
-        if (@rcmds) {
-            $g_servers{$s_addr}->dorcon_multi(@rcmds);
-        }
+    if ( ( ( $g_servers{$s_addr}->{num_trackable_players} < $g_servers{$s_addr}->{minplayers} ) ||
+          ( $g_servers{$s_addr}->{ignore_bots} == 1 && ($killer->{is_bot} == 1 || $victim->{is_bot} == 1)) ) &&
+            $g_servers{$s_addr}->{broadcasting_events} == 1 && !checkBonusRound() && !sameTeam($killer->{team}, $victim->{team}) ) {
+
+            my $k_name = getColor($killer->{name},$killer->{team});
+            my $v_name = getColor($victim->{name},$victim->{team});
+            my $k_userid  = $g_servers{$s_addr}->format_userid($killer->{"userid"});
+            my $v_userid  = $g_servers{$s_addr}->format_userid($victim->{"userid"});
+            my $colorparam = $g_servers{$s_addr}->{format_color};
+            my $hs = $headshot ? " (headshot)" : "";
+            my $msg = sprintf("%s (%s) got 0 points for killing %s (%s)%s",$k_name,number_format($killer->{"skill"}),$v_name,number_format($victim->{"skill"}),$hs);
+            my @rcmds;
+            if (($killer->{is_bot} == 0) && ($killer->{"display_events"} == 1) && ($killer->{playerid} > 0)) {
+                push(@rcmds, sprintf("%s %s%s %s",$rcmd,$k_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg)));
+            }  
+            if (($victim->{is_bot} == 0) && ($victim->{"display_events"} == 1) && $isfake == 0) {
+                push(@rcmds, sprintf("%s %s%s %s",$rcmd,$v_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg)));
+            }
+            if (@rcmds) {
+                $g_servers{$s_addr}->dorcon_multi(@rcmds);
+            }
+
     }
 
-    if (($g_servers{$s_addr}->{num_trackable_players} < $g_servers{$s_addr}->{minplayers})) {
+    if ( $g_servers{$s_addr}->{num_trackable_players} < $g_servers{$s_addr}->{minplayers} ) {
         $desc = "(IGNORED) NOTMINPLAYERS: ";
     } elsif (checkBonusRound()) {
         $desc = "(IGNORED) BonusRound: ";
@@ -1201,15 +1205,11 @@ sub doEvent_Frag
                     my $k_userid  = $g_servers{$s_addr}->format_userid($killer->{"userid"});
                     my $v_userid  = $g_servers{$s_addr}->format_userid($victim->{"userid"});
                     my $colorparam = $g_servers{$s_addr}->{format_color};
-                     
-                    my $msg = "";
-                    if ($g_servers{$s_addr}->{play_game} == L4D()) {
-                        $msg = sprintf("%s (%s)%s got %s points for killing %s",$k_name,number_format($killerskill),$killer_add_text,$k_skill,$v_name);
-                    } else {
-                        $msg = sprintf("%s (%s)%s got %s points%s for killing %s (%s)%s",$k_name,number_format($killerskill),$killer_add_text,$k_skill,$v_skill_text,$v_name,number_format($victimskill),$victim_add_text);
-                    }
+
+                    my $msg = sprintf("%s (%s)%s got %s points%s for killing %s (%s)%s",$k_name,number_format($killerskill),$killer_add_text,$k_skill,$v_skill_text,$v_name,number_format($victimskill),$victim_add_text);
+
                     my @rcmds;
-                    if (($killer->{is_bot} == 0) && ($killer->{"display_events"} == 1) && ($killer->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2())) {
+                    if (($killer->{is_bot} == 0) && ($killer->{"display_events"} == 1)) {
                         my $cmd_str = sprintf("%s %s%s %s",$rcmd,$k_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg));
                         push(@rcmds, $cmd_str);
                         if (($g_player_minkills > 20) && (($killer->{"total_kills"} < ($g_player_minkills / 4)) || (($killer->{"total_kills"} < $g_player_minkills) && (($killer->{"total_kills"} % 5) == 0)))) {
@@ -1217,7 +1217,7 @@ sub doEvent_Frag
                             push(@rcmds, $cmd_str);
                         }
                     }  
-                    if (($victim->{is_bot} == 0) && ($victim->{"display_events"} == 1) && ($g_servers{$s_addr}->{play_game} != L4D()) && ($victim->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2()) && $isfake == 0) {
+                    if (($victim->{is_bot} == 0) && ($victim->{"display_events"} == 1) && $isfake == 0) {
                         push(@rcmds, sprintf("%s %s%s %s",$rcmd,$v_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg)));
                     }
                     if (@rcmds) {
@@ -1320,11 +1320,11 @@ sub doEvent_Frag
                     my $msg = sprintf("%s lost %s points (%s) for team-killing",$k_name,$tk_penalty,number_format($k_skill));
                     
                     my @rcmds;
-                    if (($killer->{is_bot} == 0) && ($killer->{display_events} == 1) && ($killer->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2())) {
+                    if (($killer->{is_bot} == 0) && ($killer->{display_events} == 1)) {
                         my $cmd_str = sprintf("%s %s%s %s",$rcmd,$k_userid, $colorparam, $g_servers{$s_addr}->quoteparam($msg));
                         push (@rcmds, $cmd_str);
                     }
-                    if (($victim->{is_bot} == 0) && ($victim->{display_events} == 1) && ($victim->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2())) {
+                    if (($victim->{is_bot} == 0) && ($victim->{display_events} == 1)) {
                         my $cmd_str = sprintf("%s %s%s %s",$rcmd,$v_userid, $colorparam, $g_servers{$s_addr}->quoteparam($msg));
                         push (@rcmds, $cmd_str);
                     }
@@ -1509,12 +1509,12 @@ sub doEvent_PlayerPlayerAction
                             my $v_skill   = $victim->{skill};
                             my $msg = sprintf("%s %s %s points (%s) for %s%s%s against %s (%s)",$p_name,$verb,abs($reward_player), number_format($p_skill),$coloraction,$actionname,$colorend, $v_name, number_format($v_skill));
                             my @rcmds;
-                            if (($player->{is_bot} == 0) && ($player->{display_events} == 1) && ($player->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2())) {
+                            if (($player->{is_bot} == 0) && ($player->{display_events} == 1)) {
                                 my $p_userid  = $g_servers{$s_addr}->format_userid($player->{userid});
                                 my $cmd_str = sprintf("%s %s%s %s",$rcmd,$p_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg));
                                 push(@rcmds, $cmd_str);
                             }
-                            if (($victim->{is_bot} == 0) && ($victim->{display_events} == 1) && ($victim->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2())) {
+                            if (($victim->{is_bot} == 0) && ($victim->{display_events} == 1)) {
                                 my $v_userid  = $g_servers{$s_addr}->format_userid($victim->{userid});
                                 my $cmd_str = sprintf("%s %s%s %s",$rcmd,$v_userid,$colorparam,$g_servers{$s_addr}->quoteparam($msg));
                                 push(@rcmds, $cmd_str);
@@ -1777,7 +1777,7 @@ sub doEvent_PlayerAction
                 if (($g_servers{$s_addr}->{broadcasting_events} == 1) && ($reward_player != 0)) {
                     if ($g_servers{$s_addr}->{broadcasting_player_actions} == 1) {
                         my $p_userid  = $g_servers{$s_addr}->format_userid($player->{userid});
-                        if (($player->{is_bot} == 0) && ($player->{display_events} == 1) && ($player->{userid} > 0 || $g_servers{$s_addr}->{play_game} == CS2())) {
+                        if (($player->{is_bot} == 0) && ($player->{display_events} == 1)) {
                             if ($reward_player !=0) {
                                 my $verb = "got";
                                 if ($reward_player < 0) {
