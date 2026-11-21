@@ -162,6 +162,7 @@ sub track_hlstats_trend {
         INNER JOIN (
             SELECT game FROM hlstats_Servers GROUP BY game
         ) b ON a.game = b.game
+        WHERE lastAddress <> ''
         GROUP BY a.game
     };
 
@@ -3810,13 +3811,6 @@ if ($g_stdin == 0) {
     };
     if ( $daemon ) {
         printEvent("HTTP", "Opening HTTP on port:$s_port ... OK", 1);
-
-        $daemon->on(request => sub {
-            my ($d, $tx) = @_;
-            my $ct = $tx->req->headers->content_type // '';
-            $ct =~ s/[^\x09\x20-\x7e]//g;
-            $tx->req->headers->content_type($ct || 'application/octet-stream');
-        });
 
         $daemon->on(request => sub {
             $ev_unixtime   = time();
