@@ -13,7 +13,7 @@ use strict;
 our ($g_version, %g_eventTables, $dbh, $db_driver, $db_name, $db_host, $db_user, $db_pass, $s_addr, $g_stdin, $g_debug);
 
 # HLstatsZ release version number
-$g_version = "2.5.22";
+$g_version = "2.5.23";
 
 my %stmt_cache = ();
 %g_eventTables = (
