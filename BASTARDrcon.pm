@@ -605,6 +605,7 @@ sub _strip
     $buf =~ s/\x00+$//g;                 # trailing craps/nulls
     $buf =~ s/^\xFF\xFF\xFF\xFFl//;      # HL response
     $buf =~ s/^\xFF\xFF\xFF\xFFn//;      # QW response
+    $buf =~ s/^\xFF\xFF\xFF\xFF9//;      # HL refusal (Bad challenge, No challenge for your address)
     $buf =~ s/^\xFF\xFF\xFF\xFF//;       # Q2/Q3 response
     $buf =~ s/^\xFE\xFF\xFF\xFF.....//;  # old HL feature
     return $buf;
