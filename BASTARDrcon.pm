@@ -765,7 +765,7 @@ sub _players_of
                          "(.+?)"\s+            # $1 name
                          (\d+)\s+              # $2 userid
                          ([^\s]+)\s+           # $3 uniqueid (BOT or STEAM_x)
-                         \d+\s+                # frag (ignored)
+                         -?\d+\s+              # frag (ignored)
                          [\d:]+\s+             # time
                          (\d+)\s+              # $4 ping
                          \d+                   # loss
