@@ -799,7 +799,6 @@ sub doEvent_Suicide
             $player->increment("skill", $suicide_penalty);
             $player->increment("session_suicides");
             $player->increment("session_skill", $suicide_penalty);
-            match_suicide($player, $suicide_penalty) if $g_servers{$s_addr}->{match_live};
             $player->increment("map_suicides");
             $g_servers{$s_addr}->increment("suicides");
             $g_servers{$s_addr}->increment("total_suicides");

@@ -66,6 +66,7 @@ sub new
     $self->{sent_at}       = 0;     # when the last message was sent
     $self->{retry_at}      = 0;     # no new attempt before this time (a second after a failure)
     $self->{retry_wait}    = 0;     # after a refused password: seconds between attempts, doubled each time
+    $self->{keep_socket}   = 0;     # the next attempt uses the same socket (set by _lost and _failed)
     $self->{queue}         = [];    # [time, command] of the messages given while a challenge was asked for
     $self->{down_since}    = 0;     # the server has not answered since then
     $self->{down_logged}   = 0;
@@ -105,7 +106,7 @@ sub execute_nowait
             $self->{sent_at} = time();
             return 1;
         }
-        $self->_lost("Cannot send to the server: $!");
+        $self->_lost("Cannot send to the server: $!", 1);
     }
     my $queue = $self->{queue};
     push @$queue, [time(), $command];
@@ -181,7 +182,7 @@ sub _wire_pump
         unless ($cb) {
             shift @$wire;
             unless ($self->_send_rcon($command)) {
-                $self->_lost("Cannot send to the server: $!");
+                $self->_lost("Cannot send to the server: $!", 1);
                 return;
             }
             $self->{sent_at} = time();
@@ -205,7 +206,7 @@ sub _wire_pump
         unless ($self->_send_rcon($command)) {
             my $addr = $self->{addr};
             Mojo::IOLoop->next_tick(sub { _later_call($addr, $cb, undef) });
-            $self->_lost("Cannot send to the server: $!");
+            $self->_lost("Cannot send to the server: $!", 1);
             return;
         }
         my $now = time();
@@ -306,7 +307,7 @@ sub _sendrecv_now
     my ($self, $cmd, $done, $retried) = @_;
     return "" unless $self->{ready};
     unless ($self->_send_rcon($cmd)) {
-        $self->_lost("Cannot send to the server: $!");
+        $self->_lost("Cannot send to the server: $!", 1);
         return "";
     }
 
@@ -326,6 +327,7 @@ sub _sendrecv_now
             return "";
         }
         ::printEvent("RCON", "Challenge expired", 1, $self->{addr});
+        $self->{keep_socket} = 1;       # as in _lost: the socket is not at fault
         return "" unless $self->_open_now();
         return $self->_sendrecv_now($cmd, $done, 1);
     }
@@ -358,37 +360,40 @@ sub _open_now
     my $deadline = time() + $TIMEOUT;
     while ($self->{opening}) {
         my $remain = $deadline - time();
-        return $self->_failed("No answer to the rcon challenge") if $remain <= 0;
+        return $self->_failed("No answer to the rcon challenge", 1) if $remain <= 0;
         $self->_read_packets($remain);
     }
     return $self->{ready};
 }
 
 #
-# Ask for a challenge on a new socket, without waiting: the event loop reads the answer, then checks the password
-# with a harmless command. The answers still on their way to the old socket are dropped with it.
+# Ask for a challenge, without waiting: the event loop reads the answer, then checks the password with a harmless
+# command. On the socket in use when _lost or _failed kept it (a lost challenge, a server that gives no answer), on
+# a new one otherwise: the answers still on their way to the old socket are dropped with it.
 # A server that is up answers within its next frame: one attempt a second while it does not.
 #
 sub _open
 {
     my ($self, $wait) = @_;
     return 0 if $self->{destroyed};
-    $self->_close_socket();
+    my $kept = delete $self->{keep_socket};
+    $self->_close_socket($kept);
     $self->{attempt_at} = time();
 
-    my $proto = getprotobyname('udp') // 0;
-    my $sock;
-    unless (socket($sock, PF_INET, SOCK_DGRAM, $proto) && bind($sock, sockaddr_in(0, INADDR_ANY))) {
-        return $self->_failed("Cannot setup UDP socket: $!");
-    }
-    $self->{rcon_socket} = $sock;
-    $self->{opening}     = 'challenge';
-
-    # The socket is read by the event loop from now on: answers to messages, an expired challenge
     Scalar::Util::weaken(my $weak = $self);
     my $reactor = Mojo::IOLoop->singleton->reactor;
-    $reactor->io($sock => sub { $weak->_read_packets(0) if $weak })->watch($sock, 1, 0);
-    $self->{open_timer} = $reactor->timer($wait || $RETRY_EVERY => sub { $weak->_failed("No answer to the rcon challenge") if $weak && $weak->{opening} });
+    unless ($self->{rcon_socket}) {
+        my $proto = getprotobyname('udp') // 0;
+        my $sock;
+        unless (socket($sock, PF_INET, SOCK_DGRAM, $proto) && bind($sock, sockaddr_in(0, INADDR_ANY))) {
+            return $self->_failed("Cannot setup UDP socket: $!");
+        }
+        $self->{rcon_socket} = $sock;
+        # The socket is read by the event loop from now on: answers to messages, an expired challenge
+        $reactor->io($sock => sub { $weak->_read_packets(0) if $weak })->watch($sock, 1, 0);
+    }
+    $self->{opening} = 'challenge';
+    $self->{open_timer} = $reactor->timer($wait || $RETRY_EVERY => sub { $weak->_failed("No answer to the rcon challenge", 1) if $weak && $weak->{opening} });
 
     return 1 if $self->_send_raw("challenge rcon\n");
     return $self->_failed("Cannot send to the server: $!");
@@ -429,6 +434,8 @@ sub _handle_packet
         return 1 if $self->_send_rcon("echo hlstatsz");
         return $self->_failed("Cannot send to the server: $!");
     }
+    # A late answer to an earlier "challenge rcon" on a socket that was kept (see _failed, _lost): the answer to nothing else
+    return if $buf =~ /^challenge\s+rcon\s+"?-?\d/i;
     if ($buf =~ /^(?:Bad challenge|No challenge)/m) {
         return $opening ? $self->_failed("Challenge refused") : $self->_lost("Challenge expired");
     }
@@ -476,11 +483,16 @@ sub _opened
 # No answer: tried again a second after the start of this attempt (at once after a time-out). The error count grows
 # with the time the server has been down (1, then 2 after 15 s, 3 after 30 s: hlstats.pl takes the players off a server
 # that has been down for 30 s).
+# $no_answer: the attempt timed out. When not even the challenge came, the socket is kept for the next attempt (a
+# server that is down is not given a new socket every second): nothing but "challenge rcon" was sent on it since, and
+# a challenge that comes late is as good. In every other case the socket is closed: its late answers must be dropped.
 #
 sub _failed
 {
-    my ($self, $why) = @_;
-    $self->_close_socket();
+    my ($self, $why, $no_answer) = @_;
+    my $keep = ($no_answer && $self->{opening} eq 'challenge' && $self->{rcon_socket}) ? 1 : 0;
+    $self->_close_socket($keep);
+    $self->{keep_socket} = $keep;
     my $now = time();
     $self->{down_since} ||= $now;
     $self->{rcon_err} = 1 + int(($now - $self->{down_since}) / 15);
@@ -491,15 +503,19 @@ sub _failed
 }
 
 #
-# A server that answered stopped answering, or changed its challenge: a new one is asked for at once, in the background
+# A server that answered stopped answering, or changed its challenge (it was restarted): a new one is asked for at
+# once, in the background, on the same socket. The socket is not at fault, and the server answers in the order it was
+# asked: what it still sends for the old challenge comes before the new one, and is ignored until then.
+# $new_socket: the socket could not send, it is replaced.
 #
 sub _lost
 {
-    my ($self, $why) = @_;
+    my ($self, $why, $new_socket) = @_;
     $self->{down_since} ||= time();
     $self->{rcon_err} ||= 1;
     ::printEvent("RCON", "$why: asking for a new challenge", 3, $self->{addr});
     $self->{retry_at} = 0;
+    $self->{keep_socket} = ($self->{rcon_socket} && !$new_socket) ? 1 : 0;
     $self->_open();
     return 0;
 }
@@ -548,10 +564,10 @@ sub _log_down
 
 sub _close_socket
 {
-    my ($self) = @_;
+    my ($self, $keep) = @_;     # $keep: the attempt ends, the socket stays for the next one (see _failed)
     my $reactor = Mojo::IOLoop->singleton->reactor;
     $reactor->remove(delete $self->{open_timer}) if $self->{open_timer};
-    if (my $sock = delete $self->{rcon_socket}) {
+    if (!$keep && (my $sock = delete $self->{rcon_socket})) {
         $reactor->remove($sock) if defined fileno($sock);
         eval { close($sock); };
     }

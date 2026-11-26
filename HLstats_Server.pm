@@ -810,8 +810,7 @@ sub set_status
         }
 
         $servhostname = ::utf8_text($servhostname);
-        # Not during a match: the server is named after it then (HLstats_Match.plib)
-        if (($self->{update_hostname} > 0) && ($self->{name} ne $servhostname) && ($servhostname) && !$self->{match}) {
+        if (($self->{update_hostname} > 0) && ($self->{name} ne $servhostname) && ($servhostname)) {
             $self->{name} = $servhostname;
             $update++;
         }
@@ -1434,7 +1433,7 @@ sub messageAll
 sub messageMany
 {
     my($self, $msg, $toall, @userlist) = @_;
-    if (scalar(@userlist) > 0)
+    if (@userlist && scalar(@userlist) > 0)
     {
         if ($self->{mod} eq "SOURCEMOD")
         {
@@ -1456,15 +1455,9 @@ sub messageMany
         {
             while (@userlist)
             {
-                my $usersendlist = "";
-                for ($i = 0; $i < 8; $i++)
-                {
-                    $usersendlist .= shift(@userlist);
-                    if ($i < 7)
-                    {
-                        $usersendlist .= ",";
-                    }
-                }
+                # hlx_amx_bulkpsay takes 8 userids at a time: the last batch is padded with empty ones
+                my @chunk = splice(@userlist, 0, 8);
+                my $usersendlist = join(",", @chunk, ('') x (8 - @chunk));
                 $self->dorcon("hlx_amx_bulkpsay \"$usersendlist\"".$self->{format_color}." ".$self->quoteparam($msg));
             }
         }
